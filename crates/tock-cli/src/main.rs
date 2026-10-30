@@ -239,7 +239,11 @@ fn load_context(g: &Global) -> Result<Context, CliError> {
             board: env("TOCK_BOARD"),
             transport: env("TOCK_TRANSPORT"),
             device: env("TOCK_DEVICE"),
-            options: std::env::vars()
+            // `vars_os`, not `vars`: the latter panics on any variable in the
+            // environment that is not valid Unicode, including ones that have
+            // nothing to do with us.
+            options: std::env::vars_os()
+                .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
                 .filter(|(_, v)| !v.is_empty())
                 .filter_map(|(k, v)| Some((tock_board::env_option_key(&k)?, v)))
                 .collect(),

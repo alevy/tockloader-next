@@ -623,3 +623,32 @@ fn env_sets_transport_options() {
         vec!["app"]
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_environment_variable_does_not_break_the_tool() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let d = Dir::new("bad_env");
+    d.erased("flash.bin");
+    std::fs::write(
+        d.path("Tock.toml"),
+        "board = \"nrf52840dk\"\ntransport = \"file\"\n\
+         [transports.file]\npath = \"flash.bin\"\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["list"])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("no-user-config.toml"))
+        .env("TOCK_PROJECT", d.path("Tock.toml"))
+        .env("SOME_OTHER_TOOL", OsString::from_vec(vec![0xff, 0xfe]))
+        .output()
+        .unwrap();
+    // Scanning for TOCK_OPT_* must not care that some unrelated variable in
+    // the environment is not valid Unicode.
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("panicked"), "{err}");
+    ok(out);
+}

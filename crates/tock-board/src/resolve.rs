@@ -11,9 +11,10 @@
 //! 5. user config
 //! 6. board file
 //!
-//! Transport options layer per key in the same order, except that there is no
-//! board/transport/device equivalent of `[connection.<name>]`: flag, device
-//! alias, project file, user config, board file.
+//! Transport options layer per key, highest first: `--opt`, `TOCK_OPT_<KEY>`,
+//! device alias, `[transports.<name>]` in the project file,
+//! `[transports.<name>]` in the user config, `[connection.<name>]` in the
+//! board file.
 //!
 //! Every resolved value carries its [`Source`], so `tock config show` can
 //! explain all of it.
