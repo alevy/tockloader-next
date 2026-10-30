@@ -4,7 +4,8 @@
 //! Precedence, highest first, for each setting:
 //!
 //! 1. command-line flag
-//! 2. environment variable (`TOCK_BOARD`, `TOCK_TRANSPORT`, `TOCK_DEVICE`)
+//! 2. environment variable (`TOCK_BOARD`, `TOCK_TRANSPORT`, `TOCK_DEVICE`, and
+//!    `TOCK_OPT_<KEY>` for transport options)
 //! 3. the selected device alias from the user config
 //! 4. project file (`Tock.toml`)
 //! 5. user config
@@ -206,17 +207,20 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Context, Error
     if let Some((_, a)) = &alias {
         layer(Some(&a.options), alias_source());
     }
-    for (k, v) in &inputs.flags.options {
-        // Accept TOML values (numbers, booleans, arrays); anything else is a
-        // string.
-        let value = toml::from_str::<toml::Table>(&format!("v = {v}"))
-            .ok()
-            .and_then(|mut t| t.remove("v"))
-            .unwrap_or_else(|| toml::Value::String(v.clone()));
+    for (k, v) in &inputs.env.options {
         options.insert(
             k.clone(),
             Sourced {
-                value,
+                value: parse_option_value(v),
+                source: Source::Env(env_option_var(k)),
+            },
+        );
+    }
+    for (k, v) in &inputs.flags.options {
+        options.insert(
+            k.clone(),
+            Sourced {
+                value: parse_option_value(v),
                 source: Source::Flag(format!("--opt {k}")),
             },
         );
@@ -236,6 +240,27 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Context, Error
         project: project.map(|(o, _)| o.clone()),
         user: user.map(|(o, _)| o.clone()),
     })
+}
+
+/// Accept TOML values (numbers, booleans, arrays); anything else is a string.
+fn parse_option_value(raw: &str) -> toml::Value {
+    toml::from_str::<toml::Table>(&format!("v = {raw}"))
+        .ok()
+        .and_then(|mut t| t.remove("v"))
+        .unwrap_or_else(|| toml::Value::String(raw.to_string()))
+}
+
+/// The environment variable an option key is read from. Option keys are
+/// kebab-case, so `chip-name` is `TOCK_OPT_CHIP_NAME`.
+pub fn env_option_var(key: &str) -> String {
+    format!("TOCK_OPT_{}", key.to_uppercase().replace('-', "_"))
+}
+
+/// The option key an environment variable name carries, if it is one.
+pub fn env_option_key(var: &str) -> Option<String> {
+    var.strip_prefix("TOCK_OPT_")
+        .filter(|rest| !rest.is_empty())
+        .map(|rest| rest.to_lowercase().replace('_', "-"))
 }
 
 fn pick(layers: &[(Option<&String>, Source)]) -> Option<Sourced<String>> {
@@ -414,6 +439,41 @@ mod tests {
         );
         // ...and project still beats user config.
         assert_eq!(ctx.transport.options["speed"].value.as_integer(), Some(9000));
+    }
+
+    #[test]
+    fn env_options_beat_project_and_lose_to_flags() {
+        let project = ProjectFile::parse(
+            "Tock.toml",
+            "board = \"nrf52840dk\"\ntransport = \"file\"\n\
+             [transports.file]\npath = \"from-project\"\n",
+        )
+        .unwrap();
+        let env_layer = || Layer {
+            options: vec![("path".into(), "from-env".into())],
+            ..Default::default()
+        };
+
+        let mut i = inputs(Layer::default(), Some(("Tock.toml".into(), &project)), None);
+        i.env = env_layer();
+        let ctx = resolve(&i, &Files(vec![])).unwrap();
+        assert_eq!(ctx.transport.options["path"].value.as_str(), Some("from-env"));
+        assert_eq!(
+            ctx.transport.options["path"].source,
+            Source::Env("TOCK_OPT_PATH".into())
+        );
+
+        let flags = Layer {
+            options: vec![("path".into(), "from-flag".into())],
+            ..Default::default()
+        };
+        let mut i = inputs(flags, Some(("Tock.toml".into(), &project)), None);
+        i.env = env_layer();
+        let ctx = resolve(&i, &Files(vec![])).unwrap();
+        assert_eq!(
+            ctx.transport.options["path"].value.as_str(),
+            Some("from-flag")
+        );
     }
 
     #[test]

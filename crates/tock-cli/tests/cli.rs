@@ -588,3 +588,33 @@ fn user_config_paths_resolve_against_the_user_config() {
     ok(out);
     assert!(!d.path("images").exists());
 }
+
+#[test]
+fn env_sets_transport_options() {
+    let d = Dir::new("env_opt");
+    d.erased("other.bin");
+    let app = d.tab("app", 9000, None);
+    std::fs::write(
+        d.path("Tock.toml"),
+        "board = \"nrf52840dk\"\ntransport = \"file\"\n\
+         [transports.file]\npath = \"flash.bin\"\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["install", app.to_str().unwrap()])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("no-user-config.toml"))
+        .env("TOCK_PROJECT", d.path("Tock.toml"))
+        .env("TOCK_OPT_PATH", "other.bin")
+        .output()
+        .unwrap();
+    ok(out);
+    assert!(!d.path("flash.bin").exists());
+    assert_eq!(
+        list_json(&d, "path=other.bin")
+            .into_iter()
+            .map(|a| a.0)
+            .collect::<Vec<_>>(),
+        vec!["app"]
+    );
+}

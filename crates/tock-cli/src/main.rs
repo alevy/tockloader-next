@@ -239,7 +239,10 @@ fn load_context(g: &Global) -> Result<Context, CliError> {
             board: env("TOCK_BOARD"),
             transport: env("TOCK_TRANSPORT"),
             device: env("TOCK_DEVICE"),
-            options: vec![],
+            options: std::env::vars()
+                .filter(|(_, v)| !v.is_empty())
+                .filter_map(|(k, v)| Some((tock_board::env_option_key(&k)?, v)))
+                .collect(),
         },
         project: project.as_ref().map(|(o, p)| (o.clone(), p)),
         user: user.as_ref().map(|(o, u)| (o.clone(), u)),
