@@ -63,6 +63,20 @@ fn tock(dir: &Dir, args: &[&str]) -> Output {
         .unwrap()
 }
 
+/// Like [`tock`], but run from `sub` inside the project, to prove that a
+/// relative path in `Tock.toml` does not depend on the working directory.
+fn tock_in(dir: &Dir, sub: &str, args: &[&str]) -> Output {
+    let cwd = dir.0.join(sub);
+    std::fs::create_dir_all(&cwd).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(args)
+        .current_dir(&cwd)
+        .env("TOCK_CONFIG", dir.path("no-user-config.toml"))
+        .env("TOCK_PROJECT", dir.path("Tock.toml"))
+        .output()
+        .unwrap()
+}
+
 fn ok(out: Output) -> String {
     assert!(
         out.status.success(),
@@ -458,4 +472,119 @@ fn python_same_placement_for_fixed_address_apps() {
         rs_apps,
         vec![("f1".into(), 0x40000, 4096), ("f2".into(), 0x48000, 8192)]
     );
+}
+
+#[test]
+fn project_paths_resolve_against_the_project_file() {
+    let d = Dir::new("project_subdir");
+    d.erased("flash.bin");
+    d.tab("app", 9000, None);
+    std::fs::write(
+        d.path("Tock.toml"),
+        "board = \"nrf52840dk\"\ntransport = \"file\"\n\
+         [transports.file]\npath = \"flash.bin\"\n\
+         [transports.file-plugin]\npath = \"flash.bin\"\n\
+         [[app]]\ntab = \"app.tab\"\n",
+    )
+    .unwrap();
+    // Two directories down, no flags: still the image next to Tock.toml.
+    ok(tock_in(&d, "src/deep", &["install"]));
+    assert_eq!(
+        list_json(&d, "path=flash.bin")
+            .into_iter()
+            .map(|a| a.0)
+            .collect::<Vec<_>>(),
+        vec!["app"]
+    );
+    // The plugin path carries provenance across stdio identically.
+    ok(tock_in(
+        &d,
+        "src/deep",
+        &["--transport", "file-plugin", "uninstall", "app"],
+    ));
+    assert!(list_json(&d, "path=flash.bin").is_empty());
+}
+
+#[test]
+fn walking_up_to_the_project_file_still_works() {
+    let d = Dir::new("project_walkup");
+    d.erased("flash.bin");
+    let app = d.tab("app", 9000, None);
+    std::fs::write(
+        d.path("Tock.toml"),
+        "board = \"nrf52840dk\"\ntransport = \"file\"\n\
+         [transports.file]\npath = \"flash.bin\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(d.path("src/deep")).unwrap();
+    // No TOCK_PROJECT: discovery has to walk up, and the nearest Tock.toml
+    // wins over any that sit above the checkout.
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["install", app.to_str().unwrap()])
+        .current_dir(d.path("src/deep"))
+        .env("TOCK_CONFIG", d.path("no-user-config.toml"))
+        .env_remove("TOCK_PROJECT")
+        .output()
+        .unwrap();
+    ok(out);
+    assert_eq!(
+        list_json(&d, "path=flash.bin")
+            .into_iter()
+            .map(|a| a.0)
+            .collect::<Vec<_>>(),
+        vec!["app"]
+    );
+}
+
+#[test]
+fn flag_paths_resolve_against_the_current_directory() {
+    let d = Dir::new("flag_cwd");
+    let app = d.tab("app", 9000, None);
+    std::fs::write(
+        d.path("Tock.toml"),
+        "board = \"nrf52840dk\"\ntransport = \"file\"\n\
+         [transports.file]\npath = \"flash.bin\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(d.path("sub")).unwrap();
+    std::fs::write(d.path("sub/other.bin"), vec![0xFFu8; FLASH_SIZE]).unwrap();
+    ok(tock_in(
+        &d,
+        "sub",
+        &["--opt", "path=other.bin", "install", app.to_str().unwrap()],
+    ));
+    // The flag's base is the subdirectory, and Tock.toml's image was not touched.
+    assert!(d.path("sub/other.bin").is_file());
+    assert!(!d.path("flash.bin").exists());
+}
+
+#[test]
+fn user_config_paths_resolve_against_the_user_config() {
+    let d = Dir::new("user_cfg_path");
+    std::fs::create_dir_all(d.path("cfg/images")).unwrap();
+    std::fs::write(d.path("cfg/images/dk.bin"), vec![0xFFu8; FLASH_SIZE]).unwrap();
+    std::fs::write(
+        d.path("cfg/config.toml"),
+        "[transports.file]\npath = \"images/dk.bin\"\n",
+    )
+    .unwrap();
+    let app = d.tab("app", 9000, None);
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args([
+            "--board",
+            "nrf52840dk",
+            "--transport",
+            "file",
+            "install",
+            app.to_str().unwrap(),
+        ])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("cfg/config.toml"))
+        .env("TOCK_PROJECT", d.path("Tock.toml"))
+        .output()
+        .unwrap();
+    // Succeeds only because the path resolved against the config file; `create`
+    // is false, so resolving against the current directory would have errored.
+    ok(out);
+    assert!(!d.path("images").exists());
 }

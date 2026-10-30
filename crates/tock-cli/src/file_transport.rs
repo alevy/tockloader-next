@@ -9,7 +9,7 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use tock_proto::{Capability, ErrorKind, FlashInfo, Handler, Request, Response};
+use tock_proto::{Capability, ErrorKind, FlashInfo, Handler, Options, Request, Response};
 
 #[derive(Default)]
 pub struct FileTransport {
@@ -17,23 +17,19 @@ pub struct FileTransport {
 }
 
 impl FileTransport {
-    fn open(
-        &mut self,
-        flash: FlashInfo,
-        options: &serde_json::Map<String, serde_json::Value>,
-    ) -> Response {
-        let Some(path) = options.get("path").and_then(|v| v.as_str()) else {
+    fn open(&mut self, flash: FlashInfo, options: Options<'_>) -> Response {
+        // `get_path`, not `get_str`: a relative path belongs to the file it was
+        // written in, not to whatever directory the command was run from.
+        let Some(path) = options.get_path("path") else {
             return Response::Error {
                 kind: ErrorKind::Selection,
                 message: "the file transport needs a flash image path".into(),
                 suggestion: Some("--opt path=flash.bin --opt create=true".into()),
             };
         };
-        let create = options
-            .get("create")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let exists = std::path::Path::new(path).exists();
+        let path = path.display().to_string();
+        let create = options.get_bool("create").unwrap_or(false);
+        let exists = std::path::Path::new(&path).exists();
         if !exists && !create {
             return Response::Error {
                 kind: ErrorKind::Selection,
@@ -46,7 +42,7 @@ impl FileTransport {
             .write(true)
             .create(create)
             .truncate(false)
-            .open(path)
+            .open(&path)
         {
             Ok(f) => f,
             Err(e) => return Response::error(ErrorKind::Device, format!("{path}: {e}")),
@@ -129,7 +125,15 @@ impl Handler for FileTransport {
                 },
                 vec![],
             )),
-            Request::Open { flash, options, .. } => Ok((self.open(flash, &options), vec![])),
+            Request::Open {
+                flash,
+                options,
+                option_sources,
+                ..
+            } => Ok((
+                self.open(flash, Options::new(&options, &option_sources)),
+                vec![],
+            )),
             Request::Read { address, len } => self.read(address, len).map(|d| (Response::Data, d)),
             Request::Write { address } => self
                 .write(address, &payload)

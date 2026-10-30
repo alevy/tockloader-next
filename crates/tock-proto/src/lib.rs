@@ -9,6 +9,8 @@
 //!
 //! Frame: `u32 LE json_len | json | u32 LE payload_len | payload`.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::io::{Read, Write};
 
 use serde::{Deserialize, Serialize};
@@ -43,6 +45,68 @@ pub struct FlashInfo {
     pub page_size: u64,
 }
 
+/// Which configuration layer an option came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OptionLayer {
+    Flag,
+    Env,
+    Device,
+    Project,
+    User,
+    Board,
+}
+
+/// Where one resolved option came from. The core never interprets an option's
+/// meaning, so a transport that needs to resolve a relative path gets this
+/// instead: `base` is an absolute directory, always set, and is the directory
+/// of the file the value was written in (or the working directory, for values
+/// that came from a flag or the environment).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct OptionSource {
+    pub layer: OptionLayer,
+    pub file: Option<String>,
+    pub base: String,
+}
+
+/// Resolved options plus their provenance, as a transport sees them.
+pub struct Options<'a> {
+    values: &'a serde_json::Map<String, serde_json::Value>,
+    sources: &'a BTreeMap<String, OptionSource>,
+}
+
+impl<'a> Options<'a> {
+    pub fn new(
+        values: &'a serde_json::Map<String, serde_json::Value>,
+        sources: &'a BTreeMap<String, OptionSource>,
+    ) -> Options<'a> {
+        Options { values, sources }
+    }
+
+    pub fn get_str(&self, key: &str) -> Option<&'a str> {
+        self.values.get(key).and_then(|v| v.as_str())
+    }
+
+    pub fn get_bool(&self, key: &str) -> Option<bool> {
+        self.values.get(key).and_then(|v| v.as_bool())
+    }
+
+    /// A path option, resolved against the directory of the file it was
+    /// written in. Absolute values, and values with no provenance, are used
+    /// exactly as written.
+    pub fn get_path(&self, key: &str) -> Option<PathBuf> {
+        let value = PathBuf::from(self.get_str(key)?);
+        if value.is_absolute() {
+            return Some(value);
+        }
+        match self.sources.get(key) {
+            Some(source) => Some(PathBuf::from(&source.base).join(value)),
+            None => Some(value),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Request {
@@ -56,6 +120,10 @@ pub enum Request {
         arch: String,
         flash: FlashInfo,
         options: serde_json::Map<String, serde_json::Value>,
+        /// Provenance for each key in `options`. Defaulted so a transport
+        /// built before this existed still opens.
+        #[serde(rename = "option-sources", default)]
+        option_sources: BTreeMap<String, OptionSource>,
     },
     /// Payload in the response.
     Read {
@@ -329,5 +397,40 @@ mod tests {
         assert_eq!(s, r#"{"op":"read","address":16,"len":4}"#);
         let s = serde_json::to_string(&Capability::Vendor("acme.provision".into())).unwrap();
         assert_eq!(s, r#"{"vendor":"acme.provision"}"#);
+    }
+
+    fn at(base: &str) -> OptionSource {
+        OptionSource {
+            layer: OptionLayer::Project,
+            file: Some(format!("{base}/Tock.toml")),
+            base: base.into(),
+        }
+    }
+
+    #[test]
+    fn get_path_joins_relative_values_onto_the_base() {
+        let values =
+            serde_json::json!({"path": "flash.bin", "abs": "/tmp/x.bin", "bare": "y.bin"});
+        let mut sources = BTreeMap::new();
+        sources.insert("path".to_string(), at("/repo"));
+        sources.insert("abs".to_string(), at("/repo"));
+        let o = Options::new(values.as_object().unwrap(), &sources);
+        assert_eq!(o.get_path("path"), Some(PathBuf::from("/repo/flash.bin")));
+        // Absolute values pass through untouched.
+        assert_eq!(o.get_path("abs"), Some(PathBuf::from("/tmp/x.bin")));
+        // No provenance: the value is used as written.
+        assert_eq!(o.get_path("bare"), Some(PathBuf::from("y.bin")));
+        assert_eq!(o.get_path("missing"), None);
+    }
+
+    #[test]
+    fn open_without_option_sources_still_parses() {
+        let json = r#"{"op":"open","board":"b","arch":"cortex-m4",
+            "flash":{"start":0,"size":1024,"page_size":512},"options":{}}"#;
+        let r: Request = serde_json::from_str(json).unwrap();
+        match r {
+            Request::Open { option_sources, .. } => assert!(option_sources.is_empty()),
+            other => panic!("{other:?}"),
+        }
     }
 }

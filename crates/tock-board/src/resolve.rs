@@ -85,6 +85,10 @@ pub struct Context {
     pub transport: TransportContext,
     pub device: Option<Sourced<String>>,
     pub project: Option<String>,
+    /// Origin of the user config, if one was read. A device alias records only
+    /// the alias name in its [`Source`], so this is where an option that came
+    /// from an alias was actually written.
+    pub user: Option<String>,
 }
 
 impl Context {
@@ -230,6 +234,7 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Context, Error
         },
         device,
         project: project.map(|(o, _)| o.clone()),
+        user: user.map(|(o, _)| o.clone()),
     })
 }
 

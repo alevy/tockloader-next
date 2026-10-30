@@ -2,12 +2,15 @@
 //! or a `tock-transport-<name>` plugin) and memory operations on top of the
 //! protocol.
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use tock_board::Context;
 use tock_image::PageWrite;
 use tock_proto::{
-    Capability, Channel, FlashInfo, LocalChannel, ProtoError, Request, Response, StreamChannel,
+    Capability, Channel, FlashInfo, LocalChannel, OptionLayer, OptionSource, ProtoError, Request,
+    Response, StreamChannel,
 };
 
 use crate::error::{CliError, Code};
@@ -21,6 +24,44 @@ pub struct Device {
     pub transport: String,
     pub capabilities: Vec<Capability>,
     page_size: u64,
+}
+
+/// Where each resolved option was written, for transports that need to make
+/// sense of a relative value. The core never decides what an option *means*,
+/// so this is all it can offer: `base` is absolute, because a plugin or a
+/// `tock broker` client does not reliably share our working directory.
+fn option_sources(ctx: &Context, cwd: &Path) -> BTreeMap<String, OptionSource> {
+    // A board reference like `bundled:nrf52840dk` is not a file and has no
+    // directory; values from one cannot be machine-specific paths anyway.
+    let as_file = |origin: &str| (!origin.starts_with("bundled:")).then(|| origin.to_string());
+    let dir_of = |origin: Option<&String>| {
+        let Some(path) = origin.map(Path::new) else {
+            return cwd.to_path_buf();
+        };
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        absolute.parent().unwrap_or(cwd).to_path_buf()
+    };
+
+    ctx.transport
+        .options
+        .iter()
+        .map(|(key, sourced)| {
+            let (layer, file) = match &sourced.source {
+                tock_board::Source::Flag(_) => (OptionLayer::Flag, None),
+                tock_board::Source::Env(_) => (OptionLayer::Env, None),
+                tock_board::Source::Device(_) => (OptionLayer::Device, ctx.user.clone()),
+                tock_board::Source::Project(o) => (OptionLayer::Project, Some(o.clone())),
+                tock_board::Source::User(o) => (OptionLayer::User, Some(o.clone())),
+                tock_board::Source::Board(o) => (OptionLayer::Board, as_file(o)),
+            };
+            let base = dir_of(file.as_ref()).display().to_string();
+            (key.clone(), OptionSource { layer, file, base })
+        })
+        .collect()
 }
 
 /// Logs every message to stderr (`--trace-protocol`).
@@ -137,11 +178,13 @@ impl Device {
             page_size: layout.flash.page_size.0,
         };
         let options = serde_json::to_value(ctx.transport_options()).unwrap();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let open = Request::Open {
             board: ctx.board.board.name.clone(),
             arch: ctx.board.board.arch.clone(),
             flash,
             options: options.as_object().cloned().unwrap_or_default(),
+            option_sources: option_sources(ctx, &cwd),
         };
         channel.call_ok(&open, &[]).map_err(proto)?;
         Ok(Device {
