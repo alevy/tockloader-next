@@ -49,11 +49,16 @@ impl Dir {
     }
 }
 
+/// Runs in `dir`, seeing only `dir`'s own config. Pinning `TOCK_PROJECT` keeps
+/// the suite hermetic: `CARGO_TARGET_TMPDIR` lives inside the repo, so without
+/// it every test inherits whatever `Tock.toml` happens to sit above the
+/// checkout. Tests that want the walk up itself set their own environment.
 fn tock(dir: &Dir, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tock"))
         .args(args)
         .current_dir(&dir.0)
         .env("TOCK_CONFIG", dir.path("no-user-config.toml"))
+        .env("TOCK_PROJECT", dir.path("Tock.toml"))
         .output()
         .unwrap()
 }
@@ -90,6 +95,55 @@ fn list_json(dir: &Dir, opt: &str) -> Vec<(String, u64, u64)> {
             )
         })
         .collect()
+}
+
+#[test]
+fn tock_project_env_pins_the_project_file() {
+    let d = Dir::new("tock_project_pin");
+    std::fs::create_dir_all(d.path("elsewhere")).unwrap();
+    // A board no other Tock.toml in or above this tree names, so a reported
+    // board of `raspberry_pi_pico_2` can only have come from the pinned file.
+    std::fs::write(
+        d.path("elsewhere/Project.toml"),
+        "board = \"raspberry_pi_pico_2\"\ntransport = \"file\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        d.path("Tock.toml"),
+        "board = \"nrf52840dk\"\ntransport = \"file\"\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["config", "show"])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("no-user-config.toml"))
+        .env("TOCK_PROJECT", d.path("elsewhere/Project.toml"))
+        .output()
+        .unwrap();
+    let shown = ok(out);
+    assert!(shown.contains("board      raspberry_pi_pico_2"), "{shown}");
+    assert!(shown.contains("elsewhere/Project.toml"), "{shown}");
+}
+
+#[test]
+fn tock_project_env_set_to_a_nonfile_means_no_project() {
+    let d = Dir::new("tock_project_none");
+    std::fs::write(
+        d.path("Tock.toml"),
+        "board = \"nrf52840dk\"\ntransport = \"file\"\n",
+    )
+    .unwrap();
+    // A Tock.toml is right there, and an empty TOCK_PROJECT still suppresses it.
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["list"])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("no-user-config.toml"))
+        .env("TOCK_PROJECT", "")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("no board selected"), "{err}");
 }
 
 #[test]
