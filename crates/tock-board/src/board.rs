@@ -1,0 +1,203 @@
+use serde::{Deserialize, Serialize};
+use tock_image::{Placement, Region};
+
+use crate::{Error, FileSource, Size};
+
+/// Boards shipped with the tool. In the proposed model this is a snapshot
+/// generated from board files kept next to each board's linker script.
+pub const BUNDLED: &[(&str, &str)] = &[
+    (
+        "nrf52840dk",
+        include_str!("../../../boards/nrf52840dk.toml"),
+    ),
+    (
+        "raspberry_pi_pico_2",
+        include_str!("../../../boards/raspberry_pi_pico_2.toml"),
+    ),
+];
+
+pub fn bundled(name: &str) -> Option<&'static str> {
+    BUNDLED.iter().find(|(n, _)| *n == name).map(|(_, s)| *s)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct Board {
+    pub board: BoardInfo,
+    pub layout: Layout,
+    /// `default` names a transport; every other key is a transport's options.
+    #[serde(default)]
+    pub connection: toml::Table,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct BoardInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Architecture name used to pick TBFs from TABs.
+    pub arch: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct Layout {
+    pub flash: FlashRange,
+    pub kernel: Range,
+    pub apps: Range,
+    /// RAM available to apps; used to discard fixed-address builds that
+    /// cannot run on this board.
+    pub app_ram: Option<Range>,
+    /// Whether the kernel has an attribute table.
+    #[serde(default)]
+    pub attributes: bool,
+    #[serde(default)]
+    pub placement: Placement,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct Range {
+    pub start: Size,
+    pub size: Size,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct FlashRange {
+    pub start: Size,
+    pub size: Size,
+    pub page_size: Size,
+}
+
+impl Board {
+    /// Load a board by bundled name or by path. A reference is a path if it
+    /// contains `/` or ends in `.toml`; otherwise it must be a bundled name.
+    /// There is no fallback from one to the other.
+    ///
+    /// `extends = "<reference>"` at the top level merges this file over
+    /// another board file, table by table.
+    pub fn load(
+        reference: &str,
+        relative_to: Option<&str>,
+        files: &dyn FileSource,
+    ) -> Result<(Board, String), Error> {
+        let (origin, table) = load_merged(reference, relative_to, files, 0)?;
+        let board: Board = toml::Value::Table(table)
+            .try_into()
+            .map_err(|e: toml::de::Error| Error::Parse {
+                origin: origin.clone(),
+                message: e.to_string(),
+            })?;
+        board.validate(&origin)?;
+        Ok((board, origin))
+    }
+
+    pub fn parse(origin: &str, text: &str) -> Result<Board, Error> {
+        let board: Board = toml::from_str(text).map_err(|e| Error::Parse {
+            origin: origin.into(),
+            message: e.to_string(),
+        })?;
+        board.validate(origin)?;
+        Ok(board)
+    }
+
+    fn validate(&self, origin: &str) -> Result<(), Error> {
+        let l = &self.layout;
+        let invalid = |m: String| {
+            Err(Error::Parse {
+                origin: origin.into(),
+                message: m,
+            })
+        };
+        let (fs, fe) = (l.flash.start.0, l.flash.start.0 + l.flash.size.0);
+        let (as_, ae) = (l.apps.start.0, l.apps.start.0 + l.apps.size.0);
+        let (ks, ke) = (l.kernel.start.0, l.kernel.start.0 + l.kernel.size.0);
+        if l.flash.page_size.0 == 0 || !l.flash.page_size.0.is_power_of_two() {
+            return invalid("layout.flash.page-size must be a power of two".into());
+        }
+        if as_ < fs || ae > fe {
+            return invalid(format!(
+                "layout.apps ({as_:#x}..{ae:#x}) is outside layout.flash ({fs:#x}..{fe:#x})"
+            ));
+        }
+        if as_ % l.flash.page_size.0 != 0 {
+            return invalid("layout.apps.start must be page aligned".into());
+        }
+        if as_ < ke && ks < ae {
+            return invalid("layout.apps overlaps layout.kernel".into());
+        }
+        Ok(())
+    }
+
+    pub fn app_region(&self) -> Region {
+        Region {
+            start: self.layout.apps.start.0,
+            size: self.layout.apps.size.0,
+            page_size: self.layout.flash.page_size.0,
+        }
+    }
+
+    pub fn app_ram(&self) -> Option<(u64, u64)> {
+        self.layout.app_ram.map(|r| (r.start.0, r.size.0))
+    }
+
+    pub fn default_transport(&self) -> Option<&str> {
+        self.connection.get("default").and_then(|v| v.as_str())
+    }
+
+    pub fn transport_options(&self, transport: &str) -> Option<&toml::Table> {
+        self.connection.get(transport).and_then(|v| v.as_table())
+    }
+}
+
+fn load_merged(
+    reference: &str,
+    relative_to: Option<&str>,
+    files: &dyn FileSource,
+    depth: u32,
+) -> Result<(String, toml::Table), Error> {
+    if depth > 8 {
+        return Err(Error::ExtendsLoop(reference.into()));
+    }
+    let is_path = reference.contains('/') || reference.ends_with(".toml");
+    let (origin, text) = if is_path {
+        files.read(reference, relative_to)?
+    } else {
+        let text = bundled(reference).ok_or_else(|| Error::UnknownBoard(reference.into()))?;
+        (format!("bundled:{reference}"), text.to_string())
+    };
+    let mut table: toml::Table = text.parse().map_err(|e: toml::de::Error| Error::Parse {
+        origin: origin.clone(),
+        message: e.to_string(),
+    })?;
+    let Some(parent) = table.remove("extends") else {
+        return Ok((origin, table));
+    };
+    let parent = parent.as_str().ok_or_else(|| Error::Parse {
+        origin: origin.clone(),
+        message: "`extends` must be a string".into(),
+    })?;
+    let parent_rel = if origin.starts_with("bundled:") {
+        None
+    } else {
+        Some(origin.as_str())
+    };
+    let (_, mut base) = load_merged(parent, parent_rel, files, depth + 1)?;
+    merge(&mut base, table);
+    Ok((origin, base))
+}
+
+/// Overlay `top` onto `base`: tables merge recursively, anything else
+/// replaces.
+fn merge(base: &mut toml::Table, top: toml::Table) {
+    for (k, v) in top {
+        match (base.get_mut(&k), v) {
+            (Some(toml::Value::Table(b)), toml::Value::Table(t)) => merge(b, t),
+            (_, v) => {
+                base.insert(k, v);
+            }
+        }
+    }
+}

@@ -1,0 +1,34 @@
+# Raspberry Pi Pico 2 (RP2350).
+#
+# Layout from tock/boards/raspberry_pi_pico_2/layout.ld (boot from flash).
+# Python tockloader has no app address for this board and falls back to
+# 0x30000, so today users must pass --app-address by hand.
+
+[board]
+name = "raspberry_pi_pico_2"
+description = "Raspberry Pi Pico 2"
+# Tock builds Cortex-M33 apps as cortex-m4 TBFs today.
+arch = "cortex-m4"
+
+[layout]
+flash = { start = 0x1000_0000, size = "4M", page-size = "4K" }
+kernel = { start = 0x1000_0000, size = "256K" }
+apps = { start = 0x1004_0000, size = "256K" }
+app-ram = { start = 0x2000_0000, size = "520K" }
+attributes = false
+
+# Same rules Python tockloader applies to every cortex-m board. The RP2350's
+# ARMv8-M MPU may not need them (open question).
+[layout.placement]
+order = "size-descending"
+size = "power-of-two"
+alignment = "size"
+
+[connection]
+default = "openocd"
+
+[connection.openocd]
+config = ["interface/cmsis-dap.cfg", "target/rp2350.cfg"]
+
+[connection.probe-rs]
+chip = "RP235x"

@@ -1,0 +1,12 @@
+[package]
+name = "tock-proto"
+description = "Draft device protocol between the core, subcommands and transports. Message types and framing; carrier-agnostic."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

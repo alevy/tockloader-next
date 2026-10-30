@@ -1,0 +1,12 @@
+[package]
+name = "tock-image"
+description = "Pure app-region model and planner: discover apps, plan installs/uninstalls, render page writes. No I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tbf.workspace = true
+serde.workspace = true
+thiserror.workspace = true

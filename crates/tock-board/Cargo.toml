@@ -1,0 +1,14 @@
+[package]
+name = "tock-board"
+description = "Board files, project files, user config, and context resolution with provenance. No I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+tock-image.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true

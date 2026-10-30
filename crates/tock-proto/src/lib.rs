@@ -1,0 +1,333 @@
+//! Draft device protocol, spoken between the core, subcommands and
+//! transports.
+//!
+//! A message is a JSON control part plus an optional binary payload, so bulk
+//! flash data never goes through JSON. The message layer ([`Request`],
+//! [`Response`]) is separate from the carrier: [`StreamChannel`] frames
+//! messages over any byte stream (a child process's stdio today), and
+//! [`LocalChannel`] calls a handler in-process (built-in transports, WASM).
+//!
+//! Frame: `u32 LE json_len | json | u32 LE payload_len | payload`.
+
+use std::io::{Read, Write};
+
+use serde::{Deserialize, Serialize};
+
+/// Bumped on any incompatible change. 0 = draft, no stability promised.
+pub const PROTOCOL_VERSION: u32 = 0;
+
+/// What a transport can do. Commands check these up front and fail with a
+/// clear error if a capability is missing.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Capability {
+    /// `read` arbitrary flash.
+    MemoryRead,
+    /// `write` whole pages (the transport erases as needed).
+    MemoryWrite,
+    /// `hash` a range without transferring it.
+    MemoryHash,
+    /// App-level `apps-list` / `apps-install` / `apps-remove`, e.g. dynamic
+    /// loading into a running kernel.
+    Apps,
+    Reset,
+    Console,
+    /// Namespaced vendor operations, passed through untouched.
+    Vendor(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlashInfo {
+    pub start: u64,
+    pub size: u64,
+    pub page_size: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "kebab-case")]
+pub enum Request {
+    Hello {
+        protocol: u32,
+        client: String,
+    },
+    /// Connect to the device. `options` are the resolved transport options.
+    Open {
+        board: String,
+        arch: String,
+        flash: FlashInfo,
+        options: serde_json::Map<String, serde_json::Value>,
+    },
+    /// Payload in the response.
+    Read {
+        address: u64,
+        len: u64,
+    },
+    /// Payload: page-aligned data, whole pages.
+    Write {
+        address: u64,
+    },
+    Hash {
+        address: u64,
+        len: u64,
+    },
+    AppsList,
+    /// Payload: one TBF.
+    AppsInstall,
+    AppsRemove {
+        name: String,
+    },
+    Reset,
+    Vendor {
+        name: String,
+        args: serde_json::Value,
+    },
+    Close,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "kebab-case")]
+pub enum Response {
+    Hello {
+        protocol: u32,
+        transport: String,
+        version: String,
+        capabilities: Vec<Capability>,
+    },
+    Ok,
+    /// Payload carries the data.
+    Data,
+    /// SHA-256, hex.
+    Hash {
+        sha256: String,
+    },
+    Apps {
+        apps: Vec<AppInfo>,
+    },
+    Vendor {
+        value: serde_json::Value,
+    },
+    Error {
+        kind: ErrorKind,
+        message: String,
+        /// A command the user can run next, if the transport knows one.
+        suggestion: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ErrorKind {
+    Unsupported,
+    /// No device, or more than one matching device.
+    Selection,
+    Device,
+    InvalidRequest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppInfo {
+    pub name: String,
+    pub address: Option<u64>,
+    pub size: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtoError {
+    #[error("i/o: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("bad message: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("peer closed the connection")]
+    Closed,
+    #[error("{message}")]
+    Remote {
+        kind: ErrorKind,
+        message: String,
+        suggestion: Option<String>,
+    },
+    #[error("unexpected response: {0:?}")]
+    Unexpected(Box<Response>),
+}
+
+/// Something that answers requests: a transport, or the broker.
+pub trait Handler {
+    fn handle(&mut self, request: Request, payload: Vec<u8>) -> (Response, Vec<u8>);
+}
+
+/// The client side of a connection, independent of the carrier.
+pub trait Channel {
+    fn call(
+        &mut self,
+        request: &Request,
+        payload: &[u8],
+    ) -> Result<(Response, Vec<u8>), ProtoError>;
+
+    /// Like `call`, but a `Response::Error` becomes `Err`.
+    fn call_ok(
+        &mut self,
+        request: &Request,
+        payload: &[u8],
+    ) -> Result<(Response, Vec<u8>), ProtoError> {
+        match self.call(request, payload)? {
+            (
+                Response::Error {
+                    kind,
+                    message,
+                    suggestion,
+                },
+                _,
+            ) => Err(ProtoError::Remote {
+                kind,
+                message,
+                suggestion,
+            }),
+            ok => Ok(ok),
+        }
+    }
+}
+
+/// In-process carrier.
+pub struct LocalChannel<H: Handler>(pub H);
+
+impl<H: Handler> Channel for LocalChannel<H> {
+    fn call(
+        &mut self,
+        request: &Request,
+        payload: &[u8],
+    ) -> Result<(Response, Vec<u8>), ProtoError> {
+        Ok(self.0.handle(request.clone(), payload.to_vec()))
+    }
+}
+
+/// Framed carrier over a byte stream.
+pub struct StreamChannel<R: Read, W: Write> {
+    pub reader: R,
+    pub writer: W,
+}
+
+impl<R: Read, W: Write> Channel for StreamChannel<R, W> {
+    fn call(
+        &mut self,
+        request: &Request,
+        payload: &[u8],
+    ) -> Result<(Response, Vec<u8>), ProtoError> {
+        write_frame(&mut self.writer, request, payload)?;
+        read_frame(&mut self.reader)?.ok_or(ProtoError::Closed)
+    }
+}
+
+pub fn write_frame<W: Write, T: Serialize>(
+    w: &mut W,
+    message: &T,
+    payload: &[u8],
+) -> Result<(), ProtoError> {
+    let json = serde_json::to_vec(message)?;
+    w.write_all(&(json.len() as u32).to_le_bytes())?;
+    w.write_all(&json)?;
+    w.write_all(&(payload.len() as u32).to_le_bytes())?;
+    w.write_all(payload)?;
+    w.flush()?;
+    Ok(())
+}
+
+/// `Ok(None)` on a clean end of stream.
+pub fn read_frame<R: Read, T: for<'de> Deserialize<'de>>(
+    r: &mut R,
+) -> Result<Option<(T, Vec<u8>)>, ProtoError> {
+    let mut len = [0u8; 4];
+    match r.read_exact(&mut len) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
+    let mut json = vec![0u8; u32::from_le_bytes(len) as usize];
+    r.read_exact(&mut json)?;
+    r.read_exact(&mut len)?;
+    let mut payload = vec![0u8; u32::from_le_bytes(len) as usize];
+    r.read_exact(&mut payload)?;
+    Ok(Some((serde_json::from_slice(&json)?, payload)))
+}
+
+/// Serve requests from a stream until `Close` or end of stream. Used by
+/// transport plugins (`tock-transport-*`) and `tock broker`.
+pub fn serve<R: Read, W: Write, H: Handler>(
+    mut reader: R,
+    mut writer: W,
+    handler: &mut H,
+) -> Result<(), ProtoError> {
+    while let Some((request, payload)) = read_frame::<_, Request>(&mut reader)? {
+        let close = request == Request::Close;
+        let (response, out) = handler.handle(request, payload);
+        write_frame(&mut writer, &response, &out)?;
+        if close {
+            break;
+        }
+    }
+    Ok(())
+}
+
+impl Response {
+    pub fn error(kind: ErrorKind, message: impl Into<String>) -> Response {
+        Response::Error {
+            kind,
+            message: message.into(),
+            suggestion: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Echo;
+    impl Handler for Echo {
+        fn handle(&mut self, request: Request, payload: Vec<u8>) -> (Response, Vec<u8>) {
+            match request {
+                Request::Read { len, .. } => (Response::Data, vec![0xAB; len as usize]),
+                Request::Write { .. } => (Response::Ok, vec![]),
+                Request::Close => (Response::Ok, vec![]),
+                _ => (Response::error(ErrorKind::Unsupported, "nope"), payload),
+            }
+        }
+    }
+
+    #[test]
+    fn frames_round_trip_over_a_stream() {
+        // Client writes requests into a buffer; server reads them and writes
+        // responses into another buffer; client reads those.
+        let mut to_server = Vec::new();
+        write_frame(&mut to_server, &Request::Read { address: 0, len: 4 }, &[]).unwrap();
+        write_frame(&mut to_server, &Request::Write { address: 0 }, &[1, 2, 3]).unwrap();
+        write_frame(&mut to_server, &Request::Reset, &[]).unwrap();
+        write_frame(&mut to_server, &Request::Close, &[]).unwrap();
+        let mut to_client = Vec::new();
+        serve(&to_server[..], &mut to_client, &mut Echo).unwrap();
+
+        let mut r = &to_client[..];
+        let (resp, data): (Response, _) = read_frame(&mut r).unwrap().unwrap();
+        assert_eq!((resp, data), (Response::Data, vec![0xAB; 4]));
+        let (resp, _): (Response, Vec<u8>) = read_frame(&mut r).unwrap().unwrap();
+        assert_eq!(resp, Response::Ok);
+        let (resp, _): (Response, Vec<u8>) = read_frame(&mut r).unwrap().unwrap();
+        assert!(matches!(
+            resp,
+            Response::Error {
+                kind: ErrorKind::Unsupported,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn json_shape_is_readable() {
+        let s = serde_json::to_string(&Request::Read {
+            address: 16,
+            len: 4,
+        })
+        .unwrap();
+        assert_eq!(s, r#"{"op":"read","address":16,"len":4}"#);
+        let s = serde_json::to_string(&Capability::Vendor("acme.provision".into())).unwrap();
+        assert_eq!(s, r#"{"vendor":"acme.provision"}"#);
+    }
+}
