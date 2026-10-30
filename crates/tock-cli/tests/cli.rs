@@ -229,8 +229,9 @@ fn project_file_drives_everything() {
     assert!(shown.contains("transport  file"), "{shown}");
     assert!(shown.contains("from project"), "{shown}");
     assert!(
-        shown.lines().any(|l| l.trim_start().starts_with("path =")
-            && l.contains("project")),
+        shown
+            .lines()
+            .any(|l| l.trim_start().starts_with("path =") && l.contains("project")),
         "{shown}"
     );
 }
@@ -254,6 +255,10 @@ fn errors_say_what_to_run() {
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(
         err.contains("try: add --opt path=flash.bin --opt create=true"),
+        "{err}"
+    );
+    assert!(
+        err.contains("[transports.file]") && err.contains("Tock.toml"),
         "{err}"
     );
 

@@ -406,7 +406,10 @@ mod tests {
             ctx.transport.options["config"].source,
             Source::Project("Tock.toml".into())
         );
-        assert_eq!(ctx.transport.options["speed"].value.as_integer(), Some(9000));
+        assert_eq!(
+            ctx.transport.options["speed"].value.as_integer(),
+            Some(9000)
+        );
         // A table for a transport that was not selected contributes nothing.
         assert!(!ctx.transport.options.contains_key("chip"));
     }
@@ -438,7 +441,10 @@ mod tests {
             Some("from-alias")
         );
         // ...and project still beats user config.
-        assert_eq!(ctx.transport.options["speed"].value.as_integer(), Some(9000));
+        assert_eq!(
+            ctx.transport.options["speed"].value.as_integer(),
+            Some(9000)
+        );
     }
 
     #[test]
@@ -457,7 +463,10 @@ mod tests {
         let mut i = inputs(Layer::default(), Some(("Tock.toml".into(), &project)), None);
         i.env = env_layer();
         let ctx = resolve(&i, &Files(vec![])).unwrap();
-        assert_eq!(ctx.transport.options["path"].value.as_str(), Some("from-env"));
+        assert_eq!(
+            ctx.transport.options["path"].value.as_str(),
+            Some("from-env")
+        );
         assert_eq!(
             ctx.transport.options["path"].source,
             Source::Env("TOCK_OPT_PATH".into())

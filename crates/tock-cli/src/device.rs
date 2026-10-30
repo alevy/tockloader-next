@@ -288,8 +288,10 @@ pub fn proto(e: ProtoError) -> CliError {
             ..
         } => {
             let mut err = CliError::new(Code::Device, message);
-            if let Some(s) = suggestion {
-                err = err.hint(format!("add {s}"));
+            // A transport owns the whole sentence, and may offer more than one
+            // remedy: one hint per line.
+            for hint in suggestion.iter().flat_map(|s| s.lines()) {
+                err = err.hint(hint);
             }
             err
         }

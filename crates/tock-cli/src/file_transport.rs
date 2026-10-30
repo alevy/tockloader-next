@@ -4,7 +4,8 @@
 //! whole flash, starting at `layout.flash.start`.
 //!
 //! Options: `path` (required), `create = true` to create an erased image if
-//! the file does not exist.
+//! the file does not exist. A relative `path` is resolved against the file it
+//! was written in -- see `tock_proto::Options::get_path`.
 
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -24,7 +25,11 @@ impl FileTransport {
             return Response::Error {
                 kind: ErrorKind::Selection,
                 message: "the file transport needs a flash image path".into(),
-                suggestion: Some("--opt path=flash.bin --opt create=true".into()),
+                suggestion: Some(
+                    "add --opt path=flash.bin --opt create=true\n\
+                     or add `[transports.file]` with `path = \"flash.bin\"` to a Tock.toml"
+                        .into(),
+                ),
             };
         };
         let path = path.display().to_string();
@@ -34,7 +39,12 @@ impl FileTransport {
             return Response::Error {
                 kind: ErrorKind::Selection,
                 message: format!("flash image `{path}` does not exist"),
-                suggestion: Some(format!("--opt path={path} --opt create=true")),
+                suggestion: Some(
+                    "add --opt create=true to create it\n\
+                     or point `path` at an image that exists, in Tock.toml's \
+                     `[transports.file]` or with --opt path=..."
+                        .into(),
+                ),
             };
         }
         let file = match OpenOptions::new()

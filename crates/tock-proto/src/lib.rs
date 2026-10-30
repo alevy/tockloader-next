@@ -10,8 +10,8 @@
 //! Frame: `u32 LE json_len | json | u32 LE payload_len | payload`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -409,8 +409,7 @@ mod tests {
 
     #[test]
     fn get_path_joins_relative_values_onto_the_base() {
-        let values =
-            serde_json::json!({"path": "flash.bin", "abs": "/tmp/x.bin", "bare": "y.bin"});
+        let values = serde_json::json!({"path": "flash.bin", "abs": "/tmp/x.bin", "bare": "y.bin"});
         let mut sources = BTreeMap::new();
         sources.insert("path".to_string(), at("/repo"));
         sources.insert("abs".to_string(), at("/repo"));
