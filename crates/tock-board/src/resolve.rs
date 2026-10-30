@@ -10,6 +10,10 @@
 //! 5. user config
 //! 6. board file
 //!
+//! Transport options layer per key in the same order, except that there is no
+//! board/transport/device equivalent of `[connection.<name>]`: flag, device
+//! alias, project file, user config, board file.
+//!
 //! Every resolved value carries its [`Source`], so `tock config show` can
 //! explain all of it.
 
@@ -192,6 +196,9 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Context, Error
             Source::User(origin.clone()),
         );
     }
+    if let Some((_, p)) = project {
+        layer(p.transports.get(&transport.value), project_source());
+    }
     if let Some((_, a)) = &alias {
         layer(Some(&a.options), alias_source());
     }
@@ -343,6 +350,65 @@ mod tests {
             ctx.transport.options["speed"].source,
             Source::Flag("--opt speed".into())
         );
+    }
+
+    #[test]
+    fn project_transport_options_beat_the_board_file() {
+        let project = ProjectFile::parse(
+            "Tock.toml",
+            r#"
+            board = "nrf52840dk"
+            transport = "openocd"
+            [transports.openocd]
+            config = ["project.cfg"]
+            speed = 9000
+            [transports.probe-rs]
+            chip = "not-selected"
+            "#,
+        )
+        .unwrap();
+        let ctx = resolve(
+            &inputs(Layer::default(), Some(("Tock.toml".into(), &project)), None),
+            &Files(vec![]),
+        )
+        .unwrap();
+        assert_eq!(
+            ctx.transport.options["config"].source,
+            Source::Project("Tock.toml".into())
+        );
+        assert_eq!(ctx.transport.options["speed"].value.as_integer(), Some(9000));
+        // A table for a transport that was not selected contributes nothing.
+        assert!(!ctx.transport.options.contains_key("chip"));
+    }
+
+    #[test]
+    fn alias_options_beat_project_options() {
+        let project = ProjectFile::parse(
+            "Tock.toml",
+            "board = \"nrf52840dk\"\ntransport = \"jlink\"\ndevice = \"lab\"\n\
+             [transports.jlink]\nserial = \"from-project\"\nspeed = 9000\n",
+        )
+        .unwrap();
+        let user = UserConfig::parse(
+            "user.toml",
+            "[devices.lab]\nserial = \"from-alias\"\n[transports.jlink]\nspeed = 1\n",
+        )
+        .unwrap();
+        let ctx = resolve(
+            &inputs(
+                Layer::default(),
+                Some(("Tock.toml".into(), &project)),
+                Some(("user.toml".into(), &user)),
+            ),
+            &Files(vec![]),
+        )
+        .unwrap();
+        assert_eq!(
+            ctx.transport.options["serial"].value.as_str(),
+            Some("from-alias")
+        );
+        // ...and project still beats user config.
+        assert_eq!(ctx.transport.options["speed"].value.as_integer(), Some(9000));
     }
 
     #[test]

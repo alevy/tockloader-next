@@ -198,21 +198,27 @@ fn project_file_drives_everything() {
     d.tab("app", 9000, None);
     std::fs::write(
         d.path("Tock.toml"),
-        "board = \"nrf52840dk\"\ntransport = \"file\"\n[[app]]\ntab = \"svc.tab\"\n[[app]]\ntab = \"app.tab\"\n",
+        "board = \"nrf52840dk\"\ntransport = \"file\"\n\
+         [transports.file]\npath = \"flash.bin\"\n\
+         [[app]]\ntab = \"svc.tab\"\n[[app]]\ntab = \"app.tab\"\n",
     )
     .unwrap();
-    // One command, no flags (the file transport still needs its path).
-    ok(tock(&d, &["--opt", "path=flash.bin", "install"]));
+    // One command, no flags at all.
+    ok(tock(&d, &["install"]));
     let names: Vec<String> = list_json(&d, "path=flash.bin")
         .into_iter()
         .map(|a| a.0)
         .collect();
     assert_eq!(names, vec!["app", "svc"]);
 
-    let shown = ok(tock(&d, &["--opt", "path=flash.bin", "config", "show"]));
+    let shown = ok(tock(&d, &["config", "show"]));
     assert!(shown.contains("transport  file"), "{shown}");
     assert!(shown.contains("from project"), "{shown}");
-    assert!(shown.contains("(flag --opt path)"), "{shown}");
+    assert!(
+        shown.lines().any(|l| l.trim_start().starts_with("path =")
+            && l.contains("project")),
+        "{shown}"
+    );
 }
 
 #[test]

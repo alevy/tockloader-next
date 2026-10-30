@@ -12,6 +12,11 @@ pub struct ProjectFile {
     pub transport: Option<String>,
     pub device: Option<String>,
     pub kernel: Option<ProjectKernel>,
+    /// Per-transport option overrides for this project, e.g.
+    /// `[transports.file] path = "flash.bin"`. Keyed by transport name, so a
+    /// table for a transport that is not selected is simply not consulted.
+    #[serde(default)]
+    pub transports: BTreeMap<String, toml::Table>,
     #[serde(default, rename = "app")]
     pub apps: Vec<ProjectApp>,
 }
