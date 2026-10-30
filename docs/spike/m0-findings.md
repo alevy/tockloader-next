@@ -11,7 +11,7 @@ criterion) has **not** been done yet; see [What's left](#whats-left).
 | `tbf` | Parse and serialize TBF v2 headers (unknown TLVs kept byte for byte) and read TABs | none | builds |
 | `tock-image` | Pure core: `discover` the app list, `plan` installs and uninstalls, `render` the plan into page writes | none | builds |
 | `tock-board` | Board files (with `extends`), `Tock.toml`, user config, and `resolve` with a recorded source for each value | none (via `FileSource` trait) | builds |
-| `tock-proto` | Draft device protocol: messages, capabilities, framing, in-process and stream carriers | `std::io` traits only | builds |
+| `tock-proto` | Draft device protocol: messages, capabilities, framing, and a stream carrier | `std::io` traits only | builds |
 | `tock-cli` | The `tock` binary (config, porcelain, broker, external subcommands) and `tock-transport-file`, an ordinary transport executable that ships with it | yes | — |
 
 The two reference boards are described in `boards/nrf52840dk.toml` and
@@ -159,11 +159,8 @@ files with it in CI.
 - **Errors:** carry a `kind` (`unsupported`, `selection`, `device`,
   `invalid_request`) and an optional `suggestion` that the CLI turns into a
   "try:" line.
-- **Carriers:**
-  - `StreamChannel` frames over any byte stream (plugins over stdio, and
-    `tock broker`).
-  - `LocalChannel` calls a handler in-process, for hosts that embed a
-    transport rather than spawning one (WASM hosts later).
+- **Carrier:** `StreamChannel` frames over any byte stream -- transports over
+  stdio, and `tock broker`.
 
 ## What's left
 
