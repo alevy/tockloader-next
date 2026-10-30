@@ -1,6 +1,6 @@
-//! The core's side of the device connection: opening a transport (built in
-//! or a `tock-transport-<name>` plugin) and memory operations on top of the
-//! protocol.
+//! The core's side of the device connection: spawning a `tock-transport-<name>`
+//! executable and memory operations on top of the protocol. The core has no
+//! transports of its own.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -9,14 +9,11 @@ use std::process::{Child, Command, Stdio};
 use tock_board::Context;
 use tock_image::PageWrite;
 use tock_proto::{
-    Capability, Channel, FlashInfo, LocalChannel, OptionLayer, OptionSource, ProtoError, Request,
-    Response, StreamChannel,
+    Capability, Channel, FlashInfo, OptionLayer, OptionSource, ProtoError, Request, Response,
+    StreamChannel,
 };
 
 use crate::error::{CliError, Code};
-use crate::file_transport::FileTransport;
-
-pub const BUILT_IN: &[&str] = &["file"];
 
 pub struct Device {
     channel: Box<dyn Channel>,
@@ -91,54 +88,47 @@ impl Channel for Traced {
     }
 }
 
-/// Open the transport named in the context: a built-in, or an executable
-/// `tock-transport-<name>` next to `tock` or on `PATH`.
+/// Open the transport named in the context. Every transport is an executable
+/// `tock-transport-<name>`, found next to `tock` or on `PATH` -- including the
+/// `file` transport, which ships alongside `tock` but is not special.
 pub fn open_channel(
     ctx: &Context,
     trace: bool,
 ) -> Result<(Box<dyn Channel>, Option<Child>), CliError> {
     let name = &ctx.transport.name.value;
-    let (channel, child): (Box<dyn Channel>, Option<Child>) = if name == "file" {
-        (Box::new(LocalChannel(FileTransport::default())), None)
-    } else {
-        let exe = format!("tock-transport-{name}");
-        let path = crate::find_executable(&exe).ok_or_else(|| {
+    let exe = format!("tock-transport-{name}");
+    let path = crate::find_executable(&exe).ok_or_else(|| {
+        CliError::new(
+            Code::Config,
+            format!(
+                "transport `{name}` (from {}) needs `{exe}`, which was not found \
+                 next to `tock` or on PATH",
+                ctx.transport.name.source
+            ),
+        )
+        .hint(format!("install it, e.g. `cargo install {exe}`"))
+    })?;
+    let mut child = Command::new(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| {
             CliError::new(
-                Code::Config,
-                format!(
-                    "transport `{name}` (from {}) is not built in and `{exe}` was not found",
-                    ctx.transport.name.source
-                ),
+                Code::Device,
+                format!("cannot start {}: {e}", path.display()),
             )
-            .hint(format!("install it, e.g. `cargo install {exe}`"))
-            .hint(format!(
-                "or pick another: built-in transports are {}",
-                BUILT_IN.join(", ")
-            ))
         })?;
-        let mut child = Command::new(&path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| {
-                CliError::new(
-                    Code::Device,
-                    format!("cannot start {}: {e}", path.display()),
-                )
-            })?;
-        let channel = StreamChannel {
-            reader: child.stdout.take().unwrap(),
-            writer: child.stdin.take().unwrap(),
-        };
-        (Box::new(channel), Some(child))
+    let channel = StreamChannel {
+        reader: child.stdout.take().unwrap(),
+        writer: child.stdin.take().unwrap(),
     };
     let channel: Box<dyn Channel> = if trace {
-        Box::new(Traced(channel))
+        Box::new(Traced(Box::new(channel)))
     } else {
-        channel
+        Box::new(channel)
     };
-    Ok((channel, child))
+    Ok((channel, Some(child)))
 }
 
 impl Device {

@@ -2,7 +2,6 @@
 
 mod device;
 mod error;
-mod file_transport;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

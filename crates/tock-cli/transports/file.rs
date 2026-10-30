@@ -1,4 +1,4 @@
-//! The `file` transport: a flash image on disk standing in for a board.
+//! `tock-transport-file`: a flash image on disk standing in for a board.
 //!
 //! Replaces Python tockloader's "local board": the file covers the board's
 //! whole flash, starting at `layout.flash.start`.
@@ -158,5 +158,15 @@ impl Handler for FileTransport {
             )),
         };
         result.unwrap_or_else(|e| (e, vec![]))
+    }
+}
+
+fn main() {
+    let mut transport = FileTransport::default();
+    let stdin = std::io::stdin().lock();
+    let stdout = std::io::stdout().lock();
+    if let Err(e) = tock_proto::serve(stdin, stdout, &mut transport) {
+        eprintln!("tock-transport-file: {e}");
+        std::process::exit(1);
     }
 }

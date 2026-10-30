@@ -269,6 +269,8 @@ fn errors_say_what_to_run() {
     assert_eq!(out.status.code(), Some(3));
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(err.contains("tock-transport-nosuch"), "{err}");
+    // Nothing is built in any more, so nothing may claim to be.
+    assert!(!err.contains("built-in"), "{err}");
 }
 
 #[test]
@@ -295,30 +297,46 @@ fn needs_repack_suggests_flag() {
 }
 
 #[test]
-fn plugin_transport_matches_built_in() {
-    let d = Dir::new("plugin");
-    d.erased("builtin.bin");
-    d.erased("plugin.bin");
-    let (a, b) = (d.tab("a", 5000, None), d.tab("b", 30000, None));
-    let tabs = [a.to_str().unwrap(), b.to_str().unwrap()];
-    let mut args = on_file("path=builtin.bin", &["install"]);
-    args.extend(tabs);
-    ok(tock(&d, &args));
-    let mut args = vec![
-        "--board",
-        "nrf52840dk",
-        "--transport",
-        "file-plugin",
-        "--opt",
-        "path=plugin.bin",
-        "install",
-    ];
-    args.extend(tabs);
-    ok(tock(&d, &args));
-    assert!(
-        std::fs::read(d.path("builtin.bin")).unwrap()
-            == std::fs::read(d.path("plugin.bin")).unwrap()
-    );
+fn the_file_transport_is_a_standalone_executable() {
+    use tock_proto::{Capability, Channel, Request, Response, StreamChannel};
+    let d = Dir::new("standalone");
+    d.erased("flash.bin");
+
+    // Driven directly, with no `tock` in the picture at all: it is an ordinary
+    // transport executable, not something the core knows about.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tock-transport-file"))
+        .current_dir(&d.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ch = StreamChannel {
+        reader: child.stdout.take().unwrap(),
+        writer: child.stdin.take().unwrap(),
+    };
+    let (hello, _) = ch
+        .call_ok(
+            &Request::Hello {
+                protocol: 0,
+                client: "test".into(),
+            },
+            &[],
+        )
+        .unwrap();
+    match hello {
+        Response::Hello {
+            transport,
+            capabilities,
+            ..
+        } => {
+            assert_eq!(transport, "file");
+            assert!(capabilities.contains(&Capability::MemoryRead));
+            assert!(capabilities.contains(&Capability::MemoryWrite));
+        }
+        other => panic!("{other:?}"),
+    }
+    ch.call_ok(&Request::Close, &[]).unwrap();
+    assert!(child.wait().unwrap().success());
 }
 
 #[test]
@@ -488,7 +506,6 @@ fn project_paths_resolve_against_the_project_file() {
         d.path("Tock.toml"),
         "board = \"nrf52840dk\"\ntransport = \"file\"\n\
          [transports.file]\npath = \"flash.bin\"\n\
-         [transports.file-plugin]\npath = \"flash.bin\"\n\
          [[app]]\ntab = \"app.tab\"\n",
     )
     .unwrap();
@@ -501,12 +518,7 @@ fn project_paths_resolve_against_the_project_file() {
             .collect::<Vec<_>>(),
         vec!["app"]
     );
-    // The plugin path carries provenance across stdio identically.
-    ok(tock_in(
-        &d,
-        "src/deep",
-        &["--transport", "file-plugin", "uninstall", "app"],
-    ));
+    ok(tock_in(&d, "src/deep", &["uninstall", "app"]));
     assert!(list_json(&d, "path=flash.bin").is_empty());
 }
 

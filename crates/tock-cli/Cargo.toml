@@ -1,6 +1,6 @@
 [package]
 name = "tock-cli"
-description = "The `tock` command: config resolution, porcelain (install/uninstall/list), broker, and built-in transports."
+description = "The `tock` command (config resolution, porcelain, broker) and the `tock-transport-file` transport."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,8 +11,8 @@ name = "tock"
 path = "src/main.rs"
 
 [[bin]]
-name = "tock-transport-file-plugin"
-path = "src/bin/tock-transport-file-plugin.rs"
+name = "tock-transport-file"
+path = "transports/file.rs"
 
 [dependencies]
 tbf.workspace = true

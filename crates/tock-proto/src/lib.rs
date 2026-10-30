@@ -5,7 +5,8 @@
 //! flash data never goes through JSON. The message layer ([`Request`],
 //! [`Response`]) is separate from the carrier: [`StreamChannel`] frames
 //! messages over any byte stream (a child process's stdio today), and
-//! [`LocalChannel`] calls a handler in-process (built-in transports, WASM).
+//! [`LocalChannel`] calls a handler in-process, for hosts that embed a
+//! transport rather than spawning one (WASM, in-browser IDEs).
 //!
 //! Frame: `u32 LE json_len | json | u32 LE payload_len | payload`.
 
@@ -254,7 +255,8 @@ pub trait Channel {
     }
 }
 
-/// In-process carrier.
+/// In-process carrier, for a host that embeds a [`Handler`] instead of
+/// spawning `tock-transport-<name>`.
 pub struct LocalChannel<H: Handler>(pub H);
 
 impl<H: Handler> Channel for LocalChannel<H> {
@@ -397,6 +399,25 @@ mod tests {
         assert_eq!(s, r#"{"op":"read","address":16,"len":4}"#);
         let s = serde_json::to_string(&Capability::Vendor("acme.provision".into())).unwrap();
         assert_eq!(s, r#"{"vendor":"acme.provision"}"#);
+    }
+
+    #[test]
+    fn local_channel_calls_a_handler_in_process() {
+        struct Echo;
+        impl Handler for Echo {
+            fn handle(&mut self, request: Request, payload: Vec<u8>) -> (Response, Vec<u8>) {
+                match request {
+                    Request::Read { .. } => (Response::Data, payload),
+                    _ => (Response::Ok, vec![]),
+                }
+            }
+        }
+        let mut ch = LocalChannel(Echo);
+        let (r, data) = ch
+            .call_ok(&Request::Read { address: 0, len: 2 }, &[1, 2])
+            .unwrap();
+        assert_eq!(r, Response::Data);
+        assert_eq!(data, vec![1, 2]);
     }
 
     #[test]
