@@ -21,7 +21,7 @@ pub const PROTOCOL_VERSION: u32 = 0;
 /// What a transport can do. Commands check these up front and fail with a
 /// clear error if a capability is missing.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum Capability {
     /// `read` arbitrary flash.
     MemoryRead,
@@ -29,7 +29,7 @@ pub enum Capability {
     MemoryWrite,
     /// `hash` a range without transferring it.
     MemoryHash,
-    /// App-level `apps-list` / `apps-install` / `apps-remove`, e.g. dynamic
+    /// App-level `apps_list` / `apps_install` / `apps_remove`, e.g. dynamic
     /// loading into a running kernel.
     Apps,
     Reset,
@@ -47,7 +47,7 @@ pub struct FlashInfo {
 
 /// Which configuration layer an option came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum OptionLayer {
     Flag,
     Env,
@@ -63,7 +63,7 @@ pub enum OptionLayer {
 /// of the file the value was written in (or the working directory, for values
 /// that came from a flag or the environment).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub struct OptionSource {
     pub layer: OptionLayer,
     pub file: Option<String>,
@@ -108,7 +108,7 @@ impl<'a> Options<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "kebab-case")]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     Hello {
         protocol: u32,
@@ -122,7 +122,7 @@ pub enum Request {
         options: serde_json::Map<String, serde_json::Value>,
         /// Provenance for each key in `options`. Defaulted so a transport
         /// built before this existed still opens.
-        #[serde(rename = "option-sources", default)]
+        #[serde(default)]
         option_sources: BTreeMap<String, OptionSource>,
     },
     /// Payload in the response.
@@ -153,7 +153,7 @@ pub enum Request {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "kebab-case")]
+#[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
     Hello {
         protocol: u32,
@@ -183,7 +183,7 @@ pub enum Response {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     Unsupported,
     /// No device, or more than one matching device.
@@ -397,6 +397,33 @@ mod tests {
         assert_eq!(s, r#"{"op":"read","address":16,"len":4}"#);
         let s = serde_json::to_string(&Capability::Vendor("acme.provision".into())).unwrap();
         assert_eq!(s, r#"{"vendor":"acme.provision"}"#);
+    }
+
+    #[test]
+    fn multi_word_wire_names_are_snake_case() {
+        let s = serde_json::to_string(&Request::AppsList).unwrap();
+        assert_eq!(s, r#"{"op":"apps_list"}"#);
+        let s = serde_json::to_string(&Request::AppsRemove { name: "a".into() }).unwrap();
+        assert_eq!(s, r#"{"op":"apps_remove","name":"a"}"#);
+        let s = serde_json::to_string(&Capability::MemoryRead).unwrap();
+        assert_eq!(s, r#""memory_read""#);
+        let s = serde_json::to_string(&ErrorKind::InvalidRequest).unwrap();
+        assert_eq!(s, r#""invalid_request""#);
+
+        let open = Request::Open {
+            board: "b".into(),
+            arch: "cortex-m4".into(),
+            flash: FlashInfo {
+                start: 0,
+                size: 1024,
+                page_size: 512,
+            },
+            options: serde_json::Map::new(),
+            option_sources: BTreeMap::new(),
+        };
+        let s = serde_json::to_string(&open).unwrap();
+        assert!(s.contains(r#""option_sources":{}"#), "{s}");
+        assert!(!s.contains("option-sources"), "{s}");
     }
 
     fn at(base: &str) -> OptionSource {

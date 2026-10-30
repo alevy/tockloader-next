@@ -11,17 +11,17 @@ description = "Raspberry Pi Pico 2"
 arch = "cortex-m4"
 
 [layout]
-flash = { start = 0x1000_0000, size = "4M", page-size = "4K" }
+flash = { start = 0x1000_0000, size = "4M", page_size = "4K" }
 kernel = { start = 0x1000_0000, size = "256K" }
 apps = { start = 0x1004_0000, size = "256K" }
-app-ram = { start = 0x2000_0000, size = "520K" }
+app_ram = { start = 0x2000_0000, size = "520K" }
 attributes = false
 
 # Same rules Python tockloader applies to every cortex-m board. The RP2350's
 # ARMv8-M MPU may not need them (open question).
 [layout.placement]
-order = "size-descending"
-size = "power-of-two"
+order = "size_descending"
+size = "power_of_two"
 alignment = "size"
 
 [connection]

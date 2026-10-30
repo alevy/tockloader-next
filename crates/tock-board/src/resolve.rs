@@ -26,7 +26,7 @@ use serde::Serialize;
 use crate::{Board, Error, FileSource, ProjectFile, UserConfig};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "from", content = "at", rename_all = "kebab-case")]
+#[serde(tag = "from", content = "at", rename_all = "snake_case")]
 pub enum Source {
     Flag(String),
     Env(String),
@@ -252,16 +252,17 @@ fn parse_option_value(raw: &str) -> toml::Value {
 }
 
 /// The environment variable an option key is read from. Option keys are
-/// kebab-case, so `chip-name` is `TOCK_OPT_CHIP_NAME`.
+/// snake_case, so this is case alone: `chip_name` is `TOCK_OPT_CHIP_NAME`,
+/// and every key is reachable from the environment.
 pub fn env_option_var(key: &str) -> String {
-    format!("TOCK_OPT_{}", key.to_uppercase().replace('-', "_"))
+    format!("TOCK_OPT_{}", key.to_uppercase())
 }
 
 /// The option key an environment variable name carries, if it is one.
 pub fn env_option_key(var: &str) -> Option<String> {
     var.strip_prefix("TOCK_OPT_")
         .filter(|rest| !rest.is_empty())
-        .map(|rest| rest.to_lowercase().replace('_', "-"))
+        .map(|rest| rest.to_lowercase())
 }
 
 fn pick(layers: &[(Option<&String>, Source)]) -> Option<Sourced<String>> {
@@ -522,13 +523,61 @@ mod tests {
     }
 
     #[test]
+    fn env_option_names_round_trip_without_rewriting_separators() {
+        // Keys are snake_case, so the mapping is just case: no separator is
+        // rewritten, and a multi-word key is reachable from the environment.
+        assert_eq!(env_option_var("chip_name"), "TOCK_OPT_CHIP_NAME");
+        assert_eq!(
+            env_option_key("TOCK_OPT_CHIP_NAME").as_deref(),
+            Some("chip_name")
+        );
+        assert_eq!(env_option_key("TOCK_OPT_PATH").as_deref(), Some("path"));
+        assert_eq!(env_option_key("TOCK_OPT_"), None);
+        assert_eq!(env_option_key("TOCK_BOARD"), None);
+    }
+
+    #[test]
+    fn board_files_use_snake_case_keys_and_values() {
+        let files = Files(vec![(
+            "boards/snake.toml",
+            r#"
+            [board]
+            name = "snake"
+            arch = "cortex-m4"
+            [layout]
+            flash = { start = 0, size = "1M", page_size = "4K" }
+            kernel = { start = 0, size = "256K" }
+            apps = { start = 0x40000, size = "768K" }
+            app_ram = { start = 0x20000000, size = "256K" }
+            [layout.placement]
+            order = "size_descending"
+            size = "power_of_two"
+            [connection]
+            default = "probe-rs"
+            [connection.probe-rs]
+            chip = "X"
+            "#,
+        )]);
+        let flags = Layer {
+            board: Some("boards/snake.toml".into()),
+            ..Default::default()
+        };
+        let ctx = resolve(&inputs(flags, None, None), &files).unwrap();
+        assert_eq!(ctx.board.layout.flash.page_size.0, 4096);
+        assert!(ctx.board.layout.app_ram.is_some());
+        // Transport names stay as they are: `probe-rs` names an executable.
+        assert_eq!(ctx.transport.name.value, "probe-rs");
+        assert_eq!(ctx.transport.options["chip"].value.as_str(), Some("X"));
+    }
+
+    #[test]
     fn layout_is_validated() {
         let bad = r#"
             [board]
             name = "x"
             arch = "cortex-m4"
             [layout]
-            flash = { start = 0, size = "1M", page-size = "4K" }
+            flash = { start = 0, size = "1M", page_size = "4K" }
             kernel = { start = 0, size = "256K" }
             apps = { start = 0x20000, size = "128K" }
         "#;

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// `Tock.toml`: what a project builds for and installs. Found by walking up
 /// from the current directory.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ProjectFile {
     /// Bundled board name or path to a board file (relative to this file).
     pub board: Option<String>,
@@ -22,20 +22,20 @@ pub struct ProjectFile {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ProjectKernel {
     pub image: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ProjectApp {
     pub tab: String,
 }
 
 /// `~/.config/tock/config.toml`: things specific to this machine.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct UserConfig {
     /// Named devices, e.g. `[devices.lab-3]`, selectable with `--device lab-3`.
     #[serde(default)]
@@ -46,7 +46,7 @@ pub struct UserConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub struct DeviceAlias {
     pub board: Option<String>,
     pub transport: Option<String>,

@@ -41,7 +41,7 @@ impl Region {
 /// Rules the kernel's memory protection imposes on where apps can go. These
 /// come from the board file; nothing is inferred from the architecture.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub struct Placement {
     #[serde(default)]
     pub order: Order,
@@ -52,7 +52,7 @@ pub struct Placement {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum Order {
     #[default]
     AsGiven,
@@ -60,7 +60,7 @@ pub enum Order {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum SizeRule {
     #[default]
     Any,
@@ -79,7 +79,7 @@ impl SizeRule {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum Alignment {
     #[default]
     None,
@@ -109,7 +109,7 @@ impl Entry {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum ListEnd {
     /// Ran into bytes that are not a header (normally erased flash).
     Terminated,

@@ -38,7 +38,7 @@ pub struct Request {
 
 /// One element of the planned app list, in address order.
 #[derive(Clone, Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Slot {
     /// An installed app left exactly where it is.
     Keep {
@@ -91,7 +91,7 @@ impl Slot {
 
 /// What the plan does, for humans and for `--format json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "action", rename_all = "kebab-case")]
+#[serde(tag = "action", rename_all = "snake_case")]
 pub enum Action {
     Install {
         name: String,

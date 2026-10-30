@@ -152,12 +152,12 @@ files with it in CI.
   - Connection: `hello`, `open` (resolved board, flash geometry, transport
     options), `close`
   - Memory: `read`, `write` (whole pages), `hash`
-  - App-level: `apps-list`, `apps-install`, `apps-remove`
+  - App-level: `apps_list`, `apps_install`, `apps_remove`
   - Other: `reset`, `vendor` (namespaced pass-through)
-- **Capabilities:** `memory-read`, `memory-write`, `memory-hash`, `apps`,
+- **Capabilities:** `memory_read`, `memory_write`, `memory_hash`, `apps`,
   `reset`, `console`, `{"vendor": "..."}`.
 - **Errors:** carry a `kind` (`unsupported`, `selection`, `device`,
-  `invalid-request`) and an optional `suggestion` that the CLI turns into a
+  `invalid_request`) and an optional `suggestion` that the CLI turns into a
   "try:" line.
 - **Carriers:**
   - `StreamChannel` frames over any byte stream (plugins over stdio, and
@@ -175,7 +175,7 @@ The M0 exit criteria aren't met yet.
   real elf2tab TABs, including footers and credentials.
 - **The `apps` capability path** (dynamic loading) is defined in the protocol
   but not wired into the porcelain.
-- **`memory-hash`,** so slow transports can skip reading pages to compare.
+- **`memory_hash`,** so slow transports can skip reading pages to compare.
 - **Kernel attributes** (neither reference board has an attribute table).
 - **`--opt` values** aren't passed to external subcommands yet (`--board`,
   `--transport` and `--device` are).

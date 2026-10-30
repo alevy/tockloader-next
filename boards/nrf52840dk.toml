@@ -10,17 +10,17 @@ description = "Nordic nRF52840 DK"
 arch = "cortex-m4"
 
 [layout]
-flash = { start = 0x0000_0000, size = "1M", page-size = "4K" }
+flash = { start = 0x0000_0000, size = "1M", page_size = "4K" }
 kernel = { start = 0x0000_0000, size = "256K" }
 apps = { start = 0x0004_0000, size = "768K" }
-app-ram = { start = 0x2000_0000, size = "256K" }
+app_ram = { start = 0x2000_0000, size = "256K" }
 # The nRF52840 DK kernel has no attribute table.
 attributes = false
 
 # Cortex-M MPU: power-of-two sizes, aligned to their size.
 [layout.placement]
-order = "size-descending"
-size = "power-of-two"
+order = "size_descending"
+size = "power_of_two"
 alignment = "size"
 
 [connection]
