@@ -25,7 +25,9 @@ pub const PROTOCOL_VERSION: u32 = 0;
 pub enum Capability {
     /// `read` arbitrary flash.
     MemoryRead,
-    /// `write` whole pages (the transport erases as needed).
+    /// `write` an arbitrary byte range. The transport is responsible for its
+    /// device's erase granularity: if erasing destroys more than was sent, it
+    /// is the transport's job to preserve the rest.
     MemoryWrite,
     /// `hash` a range without transferring it.
     MemoryHash,
@@ -42,7 +44,6 @@ pub enum Capability {
 pub struct FlashInfo {
     pub start: u64,
     pub size: u64,
-    pub page_size: u64,
 }
 
 /// Which configuration layer an option came from.
@@ -463,7 +464,6 @@ mod tests {
             flash: FlashInfo {
                 start: 0,
                 size: 1024,
-                page_size: 512,
             },
             options: serde_json::Map::new(),
             option_sources: BTreeMap::new(),
@@ -499,7 +499,7 @@ mod tests {
     #[test]
     fn open_without_option_sources_still_parses() {
         let json = r#"{"op":"open","board":"b","arch":"cortex-m4",
-            "flash":{"start":0,"size":1024,"page_size":512},"options":{}}"#;
+            "flash":{"start":0,"size":1024},"options":{}}"#;
         let r: Request = serde_json::from_str(json).unwrap();
         match r {
             Request::Open { option_sources, .. } => assert!(option_sources.is_empty()),

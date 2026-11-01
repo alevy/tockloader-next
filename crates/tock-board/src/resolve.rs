@@ -507,7 +507,8 @@ mod tests {
         assert_eq!(ctx.board.board.name, "acme");
         assert_eq!(ctx.board.board.arch, "cortex-m4");
         assert_eq!(ctx.board.app_region().start, 0x50000);
-        assert_eq!(ctx.board.layout.flash.page_size.0, 4096);
+        // Inherited from the base board, not restated by the override.
+        assert_eq!(ctx.board.layout.flash.size.0, 1024 * 1024);
     }
 
     #[test]
@@ -545,7 +546,7 @@ mod tests {
             name = "snake"
             arch = "cortex-m4"
             [layout]
-            flash = { start = 0, size = "1M", page_size = "4K" }
+            flash = { start = 0, size = "1M" }
             kernel = { start = 0, size = "256K" }
             apps = { start = 0x40000, size = "768K" }
             app_ram = { start = 0x20000000, size = "256K" }
@@ -563,11 +564,40 @@ mod tests {
             ..Default::default()
         };
         let ctx = resolve(&inputs(flags, None, None), &files).unwrap();
-        assert_eq!(ctx.board.layout.flash.page_size.0, 4096);
         assert!(ctx.board.layout.app_ram.is_some());
         // Transport names stay as they are: `probe-rs` names an executable.
         assert_eq!(ctx.transport.name.value, "probe-rs");
         assert_eq!(ctx.transport.options["chip"].value.as_str(), Some("X"));
+    }
+
+    #[test]
+    fn board_files_no_longer_carry_a_page_size() {
+        let stale = r#"
+            [board]
+            name = "x"
+            arch = "cortex-m4"
+            [layout]
+            flash = { start = 0, size = "1M", page_size = "4K" }
+            kernel = { start = 0, size = "256K" }
+            apps = { start = 0x40000, size = "768K" }
+        "#;
+        // Loud, not ignored: someone still believes that number means something.
+        let err = Board::parse("x.toml", stale).unwrap_err().to_string();
+        assert!(err.contains("page_size"), "{err}");
+    }
+
+    #[test]
+    fn an_unaligned_app_region_is_the_kernels_business() {
+        let odd = r#"
+            [board]
+            name = "x"
+            arch = "cortex-m4"
+            [layout]
+            flash = { start = 0, size = "1M" }
+            kernel = { start = 0, size = "256K" }
+            apps = { start = 0x40010, size = "700K" }
+        "#;
+        assert!(Board::parse("x.toml", odd).is_ok());
     }
 
     #[test]
@@ -577,7 +607,7 @@ mod tests {
             name = "x"
             arch = "cortex-m4"
             [layout]
-            flash = { start = 0, size = "1M", page_size = "4K" }
+            flash = { start = 0, size = "1M" }
             kernel = { start = 0, size = "256K" }
             apps = { start = 0x20000, size = "128K" }
         "#;

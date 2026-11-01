@@ -164,7 +164,6 @@ impl Device {
         let flash = FlashInfo {
             start: layout.flash.start.0,
             size: layout.flash.size.0,
-            page_size: layout.flash.page_size.0,
         };
         let options = serde_json::to_value(ctx.transport_options()).unwrap();
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));

@@ -264,10 +264,7 @@ fn config_show(g: &Global) -> Result<(), CliError> {
     println!("board      {}  ({})", b.board.name, ctx.board_file.value);
     println!("           from {}", ctx.board_file.source);
     println!("arch       {}", b.board.arch);
-    println!(
-        "flash      {:#x} +{:#x}, {} byte pages",
-        l.flash.start.0, l.flash.size.0, l.flash.page_size.0
-    );
+    println!("flash      {:#x} +{:#x}", l.flash.start.0, l.flash.size.0);
     println!("apps       {:#x} +{:#x}", l.apps.start.0, l.apps.size.0);
     println!("placement  {:?}", l.placement);
     println!("transport  {}", ctx.transport.name.value);
@@ -601,7 +598,6 @@ fn broker(g: &Global) -> Result<(), CliError> {
         flash: tock_proto::FlashInfo {
             start: layout.flash.start.0,
             size: layout.flash.size.0,
-            page_size: layout.flash.page_size.0,
         },
         device: Device::connect(&ctx, g.trace_protocol)?,
     };

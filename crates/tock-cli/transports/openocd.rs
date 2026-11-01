@@ -89,23 +89,6 @@ impl TclReply {
     }
 }
 
-/// `flash write_image erase` erases every sector it touches, so a partial page
-/// would erase bytes the core never sent. This is not a bounds check -- it is
-/// what makes erase-before-write safe -- and it holds only while the board
-/// file's `page_size` matches the hardware's erase unit.
-fn check_whole_pages(flash: &FlashInfo, address: u64, len: u64) -> Result<(), Response> {
-    if !address.is_multiple_of(flash.page_size) || !len.is_multiple_of(flash.page_size) {
-        return Err(Response::error(
-            ErrorKind::InvalidRequest,
-            format!(
-                "writes must be whole {}-byte pages; this is {len} bytes at {address:#x}",
-                flash.page_size
-            ),
-        ));
-    }
-    Ok(())
-}
-
 /// Resolve one `config` entry. Returns the entry unchanged unless it names a
 /// file next to the config that declared it.
 fn resolve_config_entry(entry: &str, base: Option<&Path>) -> String {
@@ -360,7 +343,6 @@ impl OpenocdTransport {
 
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Response> {
         let session = self.session()?;
-        check_whole_pages(&session.flash, address, data.len() as u64)?;
 
         let mut scratch = NamedTempFile::new()?;
         scratch.write_all(data)?;

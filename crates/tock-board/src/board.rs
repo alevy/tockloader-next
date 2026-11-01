@@ -43,7 +43,7 @@ pub struct BoardInfo {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Layout {
-    pub flash: FlashRange,
+    pub flash: Range,
     pub kernel: Range,
     pub apps: Range,
     /// RAM available to apps; used to discard fixed-address builds that
@@ -61,14 +61,6 @@ pub struct Layout {
 pub struct Range {
     pub start: Size,
     pub size: Size,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct FlashRange {
-    pub start: Size,
-    pub size: Size,
-    pub page_size: Size,
 }
 
 impl Board {
@@ -114,16 +106,10 @@ impl Board {
         let (fs, fe) = (l.flash.start.0, l.flash.start.0 + l.flash.size.0);
         let (as_, ae) = (l.apps.start.0, l.apps.start.0 + l.apps.size.0);
         let (ks, ke) = (l.kernel.start.0, l.kernel.start.0 + l.kernel.size.0);
-        if l.flash.page_size.0 == 0 || !l.flash.page_size.0.is_power_of_two() {
-            return invalid("layout.flash.page_size must be a power of two".into());
-        }
         if as_ < fs || ae > fe {
             return invalid(format!(
                 "layout.apps ({as_:#x}..{ae:#x}) is outside layout.flash ({fs:#x}..{fe:#x})"
             ));
-        }
-        if as_ % l.flash.page_size.0 != 0 {
-            return invalid("layout.apps.start must be page aligned".into());
         }
         if as_ < ke && ks < ae {
             return invalid("layout.apps overlaps layout.kernel".into());
