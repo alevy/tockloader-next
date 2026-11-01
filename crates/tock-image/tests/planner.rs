@@ -9,7 +9,6 @@ fn region() -> Region {
     Region {
         start: 0x40000,
         size: 256 * KB,
-        page_size: 4 * KB,
     }
 }
 
@@ -49,7 +48,7 @@ impl Board {
         Flash::from_image(&self.region, self.region.start, &self.image)
     }
 
-    fn apply(&mut self, req: Request) -> Result<(Plan, Vec<PageWrite>), PlanError> {
+    fn apply(&mut self, req: Request) -> Result<(Plan, Vec<WriteRun>), PlanError> {
         let flash = self.flash();
         let found = discover(&self.region, &flash).unwrap();
         let plan = plan(&self.region, &self.placement, None, &found, &req)?;
@@ -385,27 +384,55 @@ fn discovery_asks_only_for_what_it_needs() {
     b.apply(install(&[("a", 8000), ("b", 8000)])).unwrap();
     let full = b.flash();
     let mut partial = Flash::new(&b.region);
-    let mut reads = 0;
+    let mut bytes_read = 0u64;
     let found = loop {
         match discover(&b.region, &partial) {
             Ok(f) => break f,
-            Err(NeedRead { pages }) => {
-                for p in pages {
-                    reads += 1;
-                    partial.insert_page(p, full.page(p).unwrap().to_vec());
+            Err(NeedRead { ranges }) => {
+                for (address, len) in ranges {
+                    bytes_read += len;
+                    partial.insert(address, &full.read(address, len).unwrap());
                 }
             }
         }
     };
     assert_eq!(found.apps().count(), 2);
-    // One page per header plus the terminator: not the whole 256 KiB region.
-    assert_eq!(reads, 3);
+    // Headers and the terminator, not pages around them, and nowhere near the
+    // whole 256 KiB region.
+    assert!(bytes_read < 1024, "read {bytes_read} bytes");
 }
 
 #[test]
-fn identical_reinstall_writes_nothing() {
+fn an_identical_reinstall_writes_nothing() {
     let mut b = Board::new(cortex_m());
     b.apply(install(&[("a", 8000)])).unwrap();
     let (_, writes) = b.apply(install(&[("a", 8000)])).unwrap();
-    assert!(writes.is_empty());
+    assert!(writes.is_empty(), "{writes:?}");
+}
+
+#[test]
+fn uninstalling_writes_only_the_header_it_rewrites() {
+    let mut b = Board::new(cortex_m());
+    b.apply(install(&[("a", 8000), ("b", 8000)])).unwrap();
+    let (_, writes) = b
+        .apply(Request {
+            uninstall: vec!["a".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    let total: usize = writes.iter().map(|w| w.data.len()).sum();
+    assert!(total <= 64, "rewrote {total} bytes: {writes:?}");
+}
+
+#[test]
+fn a_write_carries_its_bytes_and_not_the_pages_around_them() {
+    // Adding a second app leaves the first alone and writes that app's bytes,
+    // not those rounded up to a 4096-byte page. It writes fewer bytes than the
+    // app even occupies: the padding to its power-of-two size is already
+    // erased, so there is nothing to put there.
+    let mut b = Board::new(cortex_m());
+    b.apply(install(&[("a", 8000)])).unwrap();
+    let (_, writes) = b.apply(install(&[("c", 2000)])).unwrap();
+    let total: usize = writes.iter().map(|w| w.data.len()).sum();
+    assert!(total > 1000 && total < 2048, "wrote {total} bytes");
 }

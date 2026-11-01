@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use tock_board::Context;
-use tock_image::PageWrite;
+use tock_image::{COALESCE_GAP, WriteRun, coalesce};
 use tock_proto::{
     Capability, Channel, FlashInfo, OptionLayer, OptionSource, ProtoError, Request, Response,
     StreamChannel,
@@ -20,7 +20,6 @@ pub struct Device {
     child: Option<Child>,
     pub transport: String,
     pub capabilities: Vec<Capability>,
-    page_size: u64,
 }
 
 /// Where each resolved option was written, for transports that need to make
@@ -182,7 +181,6 @@ impl Device {
             child,
             transport,
             capabilities,
-            page_size: layout.flash.page_size.0,
         })
     }
 
@@ -202,39 +200,32 @@ impl Device {
         .hint("pick a transport that has it with --transport <name>"))
     }
 
-    /// Read whole pages, merging adjacent pages into one request.
-    pub fn read_pages(&mut self, pages: &[u64]) -> Result<Vec<(u64, Vec<u8>)>, CliError> {
+    /// Read byte ranges, merging nearby ones into one request. Returns the
+    /// bytes for each range as issued, which may be wider than asked for.
+    pub fn read_ranges(&mut self, ranges: &[(u64, u64)]) -> Result<Vec<(u64, Vec<u8>)>, CliError> {
         let mut out = Vec::new();
-        for (start, count) in runs(pages, self.page_size) {
+        for (address, len) in coalesce(ranges, COALESCE_GAP) {
             let (_, data) = self
                 .channel
-                .call_ok(
-                    &Request::Read {
-                        address: start,
-                        len: count * self.page_size,
-                    },
-                    &[],
-                )
+                .call_ok(&Request::Read { address, len }, &[])
                 .map_err(proto)?;
-            for (i, chunk) in data.chunks(self.page_size as usize).enumerate() {
-                out.push((start + i as u64 * self.page_size, chunk.to_vec()));
-            }
+            out.push((address, data));
         }
         Ok(out)
     }
 
-    pub fn write_pages(&mut self, writes: &[PageWrite]) -> Result<(), CliError> {
-        let addresses: Vec<u64> = writes.iter().map(|w| w.address).collect();
-        let mut i = 0;
-        for (start, count) in runs(&addresses, self.page_size) {
-            let data: Vec<u8> = writes[i..i + count as usize]
-                .iter()
-                .flat_map(|w| w.data.iter().copied())
-                .collect();
+    /// Write byte runs. `render` has already coalesced them, so each is sent
+    /// as it stands; erase granularity is the transport's business.
+    pub fn write_runs(&mut self, runs: &[WriteRun]) -> Result<(), CliError> {
+        for run in runs {
             self.channel
-                .call_ok(&Request::Write { address: start }, &data)
+                .call_ok(
+                    &Request::Write {
+                        address: run.address,
+                    },
+                    &run.data,
+                )
                 .map_err(proto)?;
-            i += count as usize;
         }
         Ok(())
     }
@@ -256,18 +247,6 @@ impl Drop for Device {
             let _ = child.wait();
         }
     }
-}
-
-/// Group sorted page addresses into `(start, page_count)` runs.
-fn runs(pages: &[u64], page_size: u64) -> Vec<(u64, u64)> {
-    let mut out: Vec<(u64, u64)> = Vec::new();
-    for &p in pages {
-        match out.last_mut() {
-            Some((s, n)) if *s + *n * page_size == p => *n += 1,
-            _ => out.push((p, 1)),
-        }
-    }
-    out
 }
 
 pub fn proto(e: ProtoError) -> CliError {

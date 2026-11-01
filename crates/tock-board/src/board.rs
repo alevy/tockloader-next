@@ -135,7 +135,6 @@ impl Board {
         Region {
             start: self.layout.apps.start.0,
             size: self.layout.apps.size.0,
-            page_size: self.layout.flash.page_size.0,
         }
     }
 

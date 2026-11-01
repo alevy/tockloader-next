@@ -86,14 +86,6 @@ impl FileTransport {
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Response> {
         let (file, flash) = self.require_open()?;
         check_range(flash, address, data.len() as u64)?;
-        if !address.is_multiple_of(flash.page_size)
-            || !(data.len() as u64).is_multiple_of(flash.page_size)
-        {
-            return Err(Response::error(
-                ErrorKind::InvalidRequest,
-                "writes must be whole pages",
-            ));
-        }
         file.seek(SeekFrom::Start(address - flash.start))?;
         file.write_all(data)?;
         Ok(())

@@ -703,17 +703,11 @@ fn the_broker_rejects_requests_outside_flash() {
         }
         other => panic!("{other:?}"),
     }
-    // A partial-page write is likewise not the transport's problem to discover.
+    // A sub-page write is no longer anyone's business to refuse.
     let (r, _) = ch
         .call(&Request::Write { address: 0x40000 }, &[0u8; 8])
         .unwrap();
-    match r {
-        Response::Error { message, .. } => {
-            assert!(message.contains("whole pages"), "{message}");
-            assert!(message.contains("nrf52840dk"), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    assert!(matches!(r, Response::Ok), "{r:?}");
     ch.call_ok(&Request::Close, &[]).unwrap();
     assert!(child.wait().unwrap().success());
 }

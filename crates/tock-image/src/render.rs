@@ -1,24 +1,23 @@
-use std::collections::BTreeMap;
-
 use serde::Serialize;
 use tbf::Header;
 
-use crate::{Flash, NeedRead, Plan, Region, Slot};
+use crate::{COALESCE_GAP, Flash, NeedRead, Plan, Region, Slot, coalesce};
 
-/// One page of flash to write, in full.
+/// A run of bytes to write. Not a page: erase geometry belongs to the
+/// transport, which is the only thing that knows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct PageWrite {
+pub struct WriteRun {
     pub address: u64,
     #[serde(skip)]
     pub data: Vec<u8>,
 }
 
-/// Turn a plan into page writes.
+/// Turn a plan into the byte runs that differ from what is already there.
 ///
-/// Only bytes the plan defines are changed; everything else in a touched page
-/// keeps its current contents, so partially covered pages must be known.
-/// Pages whose new contents equal what is known to be there are skipped.
-pub fn render(region: &Region, plan: &Plan, flash: &Flash) -> Result<Vec<PageWrite>, NeedRead> {
+/// Only bytes the plan defines are considered, and a run whose bytes already
+/// match the device is dropped -- which is why this needs to know the current
+/// contents, and asks for them when it does not.
+pub fn render(region: &Region, plan: &Plan, flash: &Flash) -> Result<Vec<WriteRun>, NeedRead> {
     // Byte runs to write, all computed from the current (pre-write) contents.
     let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
     let mut need = Vec::new();
@@ -28,7 +27,7 @@ pub fn render(region: &Region, plan: &Plan, flash: &Flash) -> Result<Vec<PageWri
             Slot::Write { address, tbf, .. } => runs.push((*address, tbf.content_bytes())),
             Slot::Move { from, to, size, .. } => match flash.read(*from, *size) {
                 Ok(bytes) => runs.push((*to, bytes)),
-                Err(e) => need.extend(e.pages),
+                Err(e) => need.extend(e.ranges),
             },
             Slot::Padding {
                 address,
@@ -42,50 +41,58 @@ pub fn render(region: &Region, plan: &Plan, flash: &Flash) -> Result<Vec<PageWri
         runs.push((plan.end, vec![0xFF; 8]));
     }
 
-    // Overlay the runs page by page.
-    let ps = flash.page_size();
-    let mut pages: BTreeMap<u64, (Vec<u8>, Vec<bool>)> = BTreeMap::new();
+    // Keep only the bytes that differ from what is there now. Asking for the
+    // current contents is what makes that possible; it is an optimisation, not
+    // a correctness requirement, and the alternative is writing more bytes.
+    let mut changed: Vec<(u64, Vec<u8>)> = Vec::new();
     for (address, bytes) in &runs {
-        for (i, b) in bytes.iter().enumerate() {
-            let a = address + i as u64;
-            let page = a / ps * ps;
-            let entry = pages
-                .entry(page)
-                .or_insert_with(|| (vec![0xFF; ps as usize], vec![false; ps as usize]));
-            entry.0[(a - page) as usize] = *b;
-            entry.1[(a - page) as usize] = true;
+        match flash.read(*address, bytes.len() as u64) {
+            Ok(current) => {
+                let mut at = 0usize;
+                while at < bytes.len() {
+                    if bytes[at] == current[at] {
+                        at += 1;
+                        continue;
+                    }
+                    let from = at;
+                    while at < bytes.len() && bytes[at] != current[at] {
+                        at += 1;
+                    }
+                    changed.push((address + from as u64, bytes[from..at].to_vec()));
+                }
+            }
+            // Unknown contents: ask, rather than writing bytes that may
+            // already be correct.
+            Err(e) => need.extend(e.ranges),
         }
     }
 
-    let mut writes = Vec::new();
-    for (page, (mut data, covered)) in pages {
-        let current = flash.page(page);
-        if covered.iter().any(|c| !c) {
-            match current {
-                Some(cur) => {
-                    for (i, c) in covered.iter().enumerate() {
-                        if !c {
-                            data[i] = cur[i];
-                        }
-                    }
-                }
-                None => {
-                    need.push(page);
-                    continue;
-                }
+    if !need.is_empty() {
+        return Err(NeedRead {
+            ranges: coalesce(&need, COALESCE_GAP),
+        });
+    }
+
+    // One write per contiguous changed region: a transport that erases before
+    // writing would otherwise erase the same sector once per run.
+    let spans = coalesce(
+        &changed
+            .iter()
+            .map(|(a, d)| (*a, d.len() as u64))
+            .collect::<Vec<_>>(),
+        COALESCE_GAP,
+    );
+    let mut writes = Vec::with_capacity(spans.len());
+    for (address, len) in spans {
+        // A merged span may cover bytes no run touched; they must be preserved.
+        let mut data = flash.read(address, len)?;
+        for (at, bytes) in &changed {
+            if *at >= address && at + bytes.len() as u64 <= address + len {
+                let off = (at - address) as usize;
+                data[off..off + bytes.len()].copy_from_slice(bytes);
             }
         }
-        if current != Some(data.as_slice()) {
-            writes.push(PageWrite {
-                address: page,
-                data,
-            });
-        }
-    }
-    if !need.is_empty() {
-        need.sort();
-        need.dedup();
-        return Err(NeedRead { pages: need });
+        writes.push(WriteRun { address, data });
     }
     Ok(writes)
 }

@@ -4,11 +4,12 @@
 //!
 //! 1. [`discover`] walks the app list using whatever flash contents are known.
 //!    If it needs bytes it does not have, it returns [`NeedRead`] and the
-//!    caller fetches those pages and calls it again.
+//!    caller fetches those ranges and calls it again.
 //! 2. [`plan`] decides where every app goes, given the apps found and a
 //!    [`Request`]. It only needs headers.
-//! 3. [`render`] turns a plan into page writes. It may also ask for more pages
-//!    (to move an app, or to merge a partially rewritten page).
+//! 3. [`render`] turns a plan into the byte runs that differ from what is
+//!    already there. It may ask for more bytes, to move an app or to tell
+//!    whether a run would change anything.
 //!
 //! Because each step is a pure function of its inputs, the whole thing can be
 //! tested against flash images without a board, and runs in WASM.
@@ -21,7 +22,12 @@ mod render;
 pub use flash::{Flash, NeedRead};
 pub use planner::{Action, NewApp, Plan, PlanError, Request, Slot, plan};
 pub use ranges::coalesce;
-pub use render::{PageWrite, render};
+
+/// Changed runs closer together than this are merged into one write. Sending
+/// a few extra bytes is far cheaper than a second erase cycle on a transport
+/// that erases before writing.
+pub const COALESCE_GAP: u64 = 256;
+pub use render::{WriteRun, render};
 
 use serde::{Deserialize, Serialize};
 use tbf::{Header, Lengths};
@@ -31,7 +37,6 @@ use tbf::{Header, Lengths};
 pub struct Region {
     pub start: u64,
     pub size: u64,
-    pub page_size: u64,
 }
 
 impl Region {
