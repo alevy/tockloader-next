@@ -24,7 +24,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tempfile::NamedTempFile;
-use tock_proto::{Capability, ErrorKind, FlashInfo, Handler, Options, Request, Response};
+use tock_proto::{Capability, ErrorKind, Handler, Options, Request, Response};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const STARTUP_POLL: Duration = Duration::from_millis(10);
@@ -89,6 +89,24 @@ impl TclReply {
     }
 }
 
+/// The sectors a write touches, as `(address, len)`, or `None` when it writes
+/// nothing. Everything inside this span is erased by `flash write_image
+/// erase`, so everything inside it has to be rewritten.
+fn sector_span(page_size: u64, address: u64, len: u64) -> Option<(u64, u64)> {
+    if len == 0 {
+        return None;
+    }
+    let start = address - address % page_size;
+    let end = (address + len).div_ceil(page_size) * page_size;
+    Some((start, end - start))
+}
+
+/// Whether a write needs the read-overlay-write path, which is whenever it
+/// does not cover whole sectors exactly.
+fn needs_merge(page_size: u64, address: u64, len: u64) -> bool {
+    !address.is_multiple_of(page_size) || !len.is_multiple_of(page_size)
+}
+
 /// Resolve one `config` entry. Returns the entry unchanged unless it names a
 /// file next to the config that declared it.
 fn resolve_config_entry(entry: &str, base: Option<&Path>) -> String {
@@ -129,7 +147,9 @@ struct Session {
     /// openocd's stderr, which would otherwise fill its pipe buffer and block
     /// the process. Kept so a failure can quote it.
     log: NamedTempFile,
-    flash: FlashInfo,
+    /// The erase unit, from the `page_size` option. openocd erases whole
+    /// sectors, so this is what a write has to be rounded out to.
+    page_size: u64,
 }
 
 impl Session {
@@ -137,7 +157,7 @@ impl Session {
         command: &str,
         configs: &[String],
         debug_level: i64,
-        flash: FlashInfo,
+        page_size: u64,
     ) -> Result<Session, Response> {
         // Choosing the port here means there is nothing to discover later.
         let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
@@ -201,7 +221,7 @@ impl Session {
             openocd,
             tcl,
             log,
-            flash,
+            page_size,
         };
         // Flash operations need a halted target, and holding it halted for the
         // session keeps every later request working the same way.
@@ -240,6 +260,38 @@ impl Session {
         }
         buf.pop(); // the terminator
         TclReply::parse(&String::from_utf8_lossy(&buf))
+    }
+
+    /// Read a range into memory, via a temp file openocd writes.
+    fn dump(&mut self, address: u64, len: u64) -> Result<Vec<u8>, Response> {
+        let scratch = NamedTempFile::new()?;
+        let path = scratch.path().display().to_string();
+        self.run(&format!("dump_image {path} {address:#x} {len}"))?;
+        let mut data = Vec::new();
+        // Reopen rather than reusing the handle: openocd wrote this file
+        // behind our back, and the fresh descriptor cannot be stale.
+        scratch.reopen()?.read_to_end(&mut data)?;
+        if data.len() as u64 != len {
+            return Err(Response::error(
+                ErrorKind::Device,
+                format!(
+                    "openocd dumped {} bytes of the {len} requested at {address:#x}",
+                    data.len()
+                ),
+            ));
+        }
+        Ok(data)
+    }
+
+    /// Write bytes, erasing the sectors they touch. Whole sectors only: see
+    /// `OpenocdTransport::write`.
+    fn program(&mut self, address: u64, data: &[u8]) -> Result<(), Response> {
+        let mut scratch = NamedTempFile::new()?;
+        scratch.write_all(data)?;
+        scratch.flush()?;
+        let path = scratch.path().display().to_string();
+        self.run(&format!("flash write_image erase {path} {address:#x} bin"))?;
+        Ok(())
     }
 
     /// Send one command and fail if openocd did.
@@ -290,7 +342,7 @@ pub struct OpenocdTransport {
 }
 
 impl OpenocdTransport {
-    fn open(&mut self, flash: FlashInfo, options: Options<'_>) -> Result<(), Response> {
+    fn open(&mut self, options: Options<'_>) -> Result<(), Response> {
         // Replace any previous session, so its openocd is killed by Drop.
         self.session = None;
         let configs = resolve_configs(&options);
@@ -309,7 +361,19 @@ impl OpenocdTransport {
             .get("debug_level")
             .and_then(|v| v.as_i64())
             .unwrap_or(2);
-        self.session = Some(Session::start(command, &configs, debug_level, flash)?);
+        // No default: guessing an erase unit is how a write silently takes a
+        // neighbour with it.
+        let Some(page_size) = options.get("page_size").and_then(|v| v.as_u64()) else {
+            return Err(Response::error(
+                ErrorKind::Selection,
+                "the openocd transport needs the flash erase unit",
+            )
+            .with_suggestion(
+                "add --opt page_size=4096\n\
+                 or give the board file a [connection.openocd] page_size entry",
+            ));
+        };
+        self.session = Some(Session::start(command, &configs, debug_level, page_size)?);
         Ok(())
     }
 
@@ -320,36 +384,29 @@ impl OpenocdTransport {
     }
 
     fn read(&mut self, address: u64, len: u64) -> Result<Vec<u8>, Response> {
-        let session = self.session()?;
-        let scratch = NamedTempFile::new()?;
-        let path = scratch.path().display().to_string();
-        session.run(&format!("dump_image {path} {address:#x} {len}"))?;
-
-        let mut data = Vec::new();
-        // Reopen rather than reusing the handle: openocd wrote this file
-        // behind our back, and the fresh descriptor cannot be stale.
-        scratch.reopen()?.read_to_end(&mut data)?;
-        if data.len() as u64 != len {
-            return Err(Response::error(
-                ErrorKind::Device,
-                format!(
-                    "openocd dumped {} bytes of the {len} requested at {address:#x}",
-                    data.len()
-                ),
-            ));
+        if len == 0 {
+            return Ok(Vec::new());
         }
-        Ok(data)
+        self.session()?.dump(address, len)
     }
 
+    /// The core sends whatever bytes changed; openocd can only erase whole
+    /// sectors. So anything that does not land on sector boundaries is read
+    /// back, overlaid, and written whole -- otherwise `erase` would take the
+    /// neighbours with it.
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Response> {
         let session = self.session()?;
-
-        let mut scratch = NamedTempFile::new()?;
-        scratch.write_all(data)?;
-        scratch.flush()?;
-        let path = scratch.path().display().to_string();
-        session.run(&format!("flash write_image erase {path} {address:#x} bin"))?;
-        Ok(())
+        let page_size = session.page_size;
+        if !needs_merge(page_size, address, data.len() as u64) {
+            return session.program(address, data);
+        }
+        let Some((start, len)) = sector_span(page_size, address, data.len() as u64) else {
+            return Ok(()); // nothing to write
+        };
+        let mut merged = session.dump(start, len)?;
+        let at = (address - start) as usize;
+        merged[at..at + data.len()].copy_from_slice(data);
+        session.program(start, &merged)
     }
 
     fn dispatch(
@@ -372,12 +429,11 @@ impl OpenocdTransport {
                 vec![],
             )),
             Request::Open {
-                flash,
                 options,
                 option_sources,
                 ..
             } => {
-                self.open(flash, Options::new(&options, &option_sources))?;
+                self.open(Options::new(&options, &option_sources))?;
                 Ok((Response::Ok, vec![]))
             }
             Request::Read { address, len } => Ok((Response::Data, self.read(address, len)?)),
@@ -426,6 +482,25 @@ mod tests {
 
     fn reply(raw: &str) -> TclReply {
         TclReply::parse(raw).expect("parses")
+    }
+
+    #[test]
+    fn sector_span_covers_every_touched_sector() {
+        // Mid-sector start and end: one sector.
+        assert_eq!(sector_span(4096, 0x1010, 16), Some((0x1000, 4096)));
+        // Spanning a boundary: both sectors, so both partial ends survive.
+        assert_eq!(sector_span(4096, 0x1ff0, 0x20), Some((0x1000, 8192)));
+        // Exactly whole sectors: unchanged.
+        assert_eq!(sector_span(4096, 0x2000, 8192), Some((0x2000, 8192)));
+        // Empty writes touch nothing.
+        assert_eq!(sector_span(4096, 0x1010, 0), None);
+    }
+
+    #[test]
+    fn only_sector_aligned_whole_sector_writes_skip_the_merge() {
+        assert!(needs_merge(4096, 0x1010, 16)); // starts mid-sector
+        assert!(needs_merge(4096, 0x1000, 100)); // aligned, but partial
+        assert!(!needs_merge(4096, 0x2000, 8192)); // exactly two sectors
     }
 
     #[test]
