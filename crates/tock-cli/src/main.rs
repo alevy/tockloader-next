@@ -497,10 +497,13 @@ fn change_apps(
     }
 
     if g.format == Format::Json {
-        let pages: Vec<u64> = writes.iter().map(|w| w.address).collect();
+        let runs: Vec<_> = writes
+            .iter()
+            .map(|w| json!({ "address": w.address, "bytes": w.data.len() }))
+            .collect();
         println!(
             "{}",
-            json!({ "dry_run": change.dry_run, "plan": plan, "pages_written": pages })
+            json!({ "dry_run": change.dry_run, "plan": plan, "writes": runs })
         );
     } else {
         let verb = if change.dry_run { "would" } else { "did" };

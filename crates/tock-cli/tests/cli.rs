@@ -200,6 +200,10 @@ fn dry_run_writes_nothing_and_reports_the_plan() {
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["dry_run"], true);
     assert_eq!(v["plan"]["actions"][0]["action"], "install");
+    // Writes are runs of bytes now; reporting bare addresses as "pages" names
+    // the thing this tool no longer has.
+    assert!(v["pages_written"].is_null(), "{v}");
+    assert!(v["writes"][0]["bytes"].as_u64().unwrap() > 0, "{v}");
     assert_eq!(v["plan"]["actions"][0]["address"], 0x40000);
     assert_eq!(std::fs::read(d.path("flash.bin")).unwrap(), before);
 }

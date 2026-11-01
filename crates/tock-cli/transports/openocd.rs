@@ -101,10 +101,25 @@ fn sector_span(page_size: u64, address: u64, len: u64) -> Option<(u64, u64)> {
     Some((start, end - start))
 }
 
-/// Whether a write needs the read-overlay-write path, which is whenever it
-/// does not cover whole sectors exactly.
-fn needs_merge(page_size: u64, address: u64, len: u64) -> bool {
-    !address.is_multiple_of(page_size) || !len.is_multiple_of(page_size)
+/// How a write has to be carried out.
+#[derive(Debug, PartialEq, Eq)]
+enum WritePlan {
+    /// Already whole sectors: send it as it stands.
+    Direct,
+    /// Read this span back, overlay, and write the whole thing, so `erase`
+    /// does not take the rest of the sector with it.
+    Merge { start: u64, len: u64 },
+}
+
+/// Decide how to write `len` bytes at `address`, or `None` when there is
+/// nothing to write. Every write goes through here, so an empty one cannot
+/// reach openocd just because its address happened to be sector-aligned.
+fn write_plan(page_size: u64, address: u64, len: u64) -> Option<WritePlan> {
+    let (start, span) = sector_span(page_size, address, len)?;
+    if address.is_multiple_of(page_size) && len.is_multiple_of(page_size) {
+        return Some(WritePlan::Direct);
+    }
+    Some(WritePlan::Merge { start, len: span })
 }
 
 /// Resolve one `config` entry. Returns the entry unchanged unless it names a
@@ -396,17 +411,16 @@ impl OpenocdTransport {
     /// neighbours with it.
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Response> {
         let session = self.session()?;
-        let page_size = session.page_size;
-        if !needs_merge(page_size, address, data.len() as u64) {
-            return session.program(address, data);
+        match write_plan(session.page_size, address, data.len() as u64) {
+            None => Ok(()),
+            Some(WritePlan::Direct) => session.program(address, data),
+            Some(WritePlan::Merge { start, len }) => {
+                let mut merged = session.dump(start, len)?;
+                let at = (address - start) as usize;
+                merged[at..at + data.len()].copy_from_slice(data);
+                session.program(start, &merged)
+            }
         }
-        let Some((start, len)) = sector_span(page_size, address, data.len() as u64) else {
-            return Ok(()); // nothing to write
-        };
-        let mut merged = session.dump(start, len)?;
-        let at = (address - start) as usize;
-        merged[at..at + data.len()].copy_from_slice(data);
-        session.program(start, &merged)
     }
 
     fn dispatch(
@@ -498,9 +512,13 @@ mod tests {
 
     #[test]
     fn only_sector_aligned_whole_sector_writes_skip_the_merge() {
-        assert!(needs_merge(4096, 0x1010, 16)); // starts mid-sector
-        assert!(needs_merge(4096, 0x1000, 100)); // aligned, but partial
-        assert!(!needs_merge(4096, 0x2000, 8192)); // exactly two sectors
+        use WritePlan::*;
+        assert!(matches!(write_plan(4096, 0x1010, 16), Some(Merge { .. })));
+        assert!(matches!(write_plan(4096, 0x1000, 100), Some(Merge { .. })));
+        assert!(matches!(write_plan(4096, 0x2000, 8192), Some(Direct)));
+        // Nothing to write, whether or not the address is sector-aligned.
+        assert_eq!(write_plan(4096, 0x2000, 0), None);
+        assert_eq!(write_plan(4096, 0x2010, 0), None);
     }
 
     #[test]
