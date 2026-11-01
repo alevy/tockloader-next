@@ -1,87 +1,382 @@
-//! `tock-transport-openocd`: tock-cli transport using openocd
+//! `tock-transport-openocd`: drives a long-lived openocd over its TCL RPC port.
+//!
+//! Nothing here parses openocd's prose. Startup picks the port itself, so
+//! readiness is a successful TCP connect and failure is openocd exiting --
+//! two unambiguous events rather than a race against stderr. Each TCL command
+//! comes back as a status plus whatever openocd logged while running it, so a
+//! failure reaches the user in openocd's own words instead of as a number.
+//!
+//! Options:
+//! - `config`: openocd config files, a string or a list. An entry that names a
+//!   file next to the config that declared it is resolved to that file;
+//!   anything else is passed through for openocd's own script search path, so
+//!   `board/nordic_nrf52_dk.cfg` keeps working.
+//! - `command`: the openocd executable (default `openocd`).
+//! - `debug_level`: openocd's log verbosity (default 2).
+//!
+//! The target is halted for the life of the session: flash operations need it,
+//! and leaving it halted keeps every request working the same way.
 
-use std::{
-    io::{BufRead as _, BufReader, Read as _, Write as _},
-    net::{TcpListener, TcpStream},
-    process::{Child, Command, Stdio},
-};
+use std::io::{BufRead as _, BufReader, Read as _, Seek as _, Write as _};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use tempfile::NamedTempFile;
-use tock_proto::{Capability, ErrorKind, Handler, Request, Response};
+use tock_proto::{Capability, ErrorKind, FlashInfo, Handler, Options, Request, Response};
 
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const STARTUP_POLL: Duration = Duration::from_millis(10);
+
+/// Separates the fields of a TCL reply. A control byte, so it cannot collide
+/// with a path or an openocd message.
+const FIELD: char = '\u{1f}';
+
+/// What one TCL command did. `rc` is openocd's own error code, not TCL's 0/1:
+/// anything non-zero failed.
+#[derive(Debug, PartialEq, Eq)]
+struct TclReply {
+    rc: i64,
+    msg: String,
+    log: String,
+}
+
+impl TclReply {
+    /// Split a reply of the form `rc FIELD msg FIELD log`.
+    ///
+    /// `rc` is not always a bare integer: a TCL-level error prefixes it with
+    /// openocd's log line, so the code is the last whitespace-separated token.
+    fn parse(raw: &str) -> Result<TclReply, Response> {
+        let unreadable =
+            || Response::error(ErrorKind::Device, format!("unreadable TCL reply: {raw:?}"));
+        let mut fields = raw.splitn(3, FIELD);
+        let (Some(status), Some(msg), Some(log)) = (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(unreadable());
+        };
+        let rc = status
+            .split_whitespace()
+            .next_back()
+            .and_then(|token| token.parse::<i64>().ok())
+            .ok_or_else(unreadable)?;
+        Ok(TclReply {
+            rc,
+            msg: msg.to_string(),
+            log: log.to_string(),
+        })
+    }
+
+    fn failed(&self) -> bool {
+        self.rc != 0
+    }
+
+    /// The best text available. openocd commands leave their explanation in
+    /// the log and `msg` empty; TCL-level errors do the opposite. When a
+    /// command logs nothing, `capture` falls through to the script's own
+    /// result -- the rc rendered as a string -- which says nothing worth
+    /// repeating.
+    fn message(&self) -> String {
+        let msg = self.msg.trim();
+        if !msg.is_empty() {
+            return msg.to_string();
+        }
+        let log = self.log.trim();
+        if !log.is_empty() && log != self.rc.to_string() {
+            return log.to_string();
+        }
+        format!("openocd returned {}", self.rc)
+    }
+}
+
+/// `flash write_image erase` erases every sector it touches, so a partial page
+/// would erase bytes the core never sent. This is not a bounds check -- it is
+/// what makes erase-before-write safe -- and it holds only while the board
+/// file's `page_size` matches the hardware's erase unit.
+fn check_whole_pages(flash: &FlashInfo, address: u64, len: u64) -> Result<(), Response> {
+    if !address.is_multiple_of(flash.page_size) || !len.is_multiple_of(flash.page_size) {
+        return Err(Response::error(
+            ErrorKind::InvalidRequest,
+            format!(
+                "writes must be whole {}-byte pages; this is {len} bytes at {address:#x}",
+                flash.page_size
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve one `config` entry. Returns the entry unchanged unless it names a
+/// file next to the config that declared it.
+fn resolve_config_entry(entry: &str, base: Option<&Path>) -> String {
+    let path = Path::new(entry);
+    if path.is_absolute() {
+        return entry.to_string();
+    }
+    if let Some(base) = base {
+        let beside = base.join(path);
+        if beside.is_file() {
+            return beside.display().to_string();
+        }
+    }
+    entry.to_string()
+}
+
+/// The `config` option as a list, accepting either a bare string or an array.
+fn resolve_configs(options: &Options<'_>) -> Vec<String> {
+    let Some(value) = options.get("config") else {
+        return Vec::new();
+    };
+    let base = options.base_dir("config");
+    let entries: Vec<&str> = match value {
+        serde_json::Value::String(s) => vec![s.as_str()],
+        serde_json::Value::Array(a) => a.iter().filter_map(|v| v.as_str()).collect(),
+        _ => Vec::new(),
+    };
+    entries
+        .into_iter()
+        .map(|e| resolve_config_entry(e, base.as_deref()))
+        .collect()
+}
+
+/// A running openocd and the connection to its TCL port.
+struct Session {
+    openocd: Child,
+    tcl: BufReader<TcpStream>,
+    /// openocd's stderr, which would otherwise fill its pipe buffer and block
+    /// the process. Kept so a failure can quote it.
+    log: NamedTempFile,
+    flash: FlashInfo,
+}
+
+impl Session {
+    fn start(
+        command: &str,
+        configs: &[String],
+        debug_level: i64,
+        flash: FlashInfo,
+    ) -> Result<Session, Response> {
+        // Choosing the port here means there is nothing to discover later.
+        let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let port = probe.local_addr()?.port();
+        drop(probe);
+
+        let log = NamedTempFile::new()?;
+        let mut openocd = Command::new(command)
+            .args(configs.iter().flat_map(|c| ["-f", c]))
+            .args(["-c", &format!("tcl_port {port}")])
+            .args(["-c", "telnet_port disabled"])
+            .args(["-c", "gdb_port disabled"])
+            .args(["-c", &format!("debug_level {debug_level}")])
+            // `init` here rather than over TCL: if it fails, openocd exits and
+            // the loop below reports that with its log, which is the clearest
+            // error we can give for "the probe or target is not there".
+            .args(["-c", "init"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(log.reopen()?)
+            .spawn()
+            .map_err(|e| {
+                Response::error(ErrorKind::Device, format!("cannot start `{command}`: {e}"))
+                    .with_suggestion(
+                        "install openocd, or specify its path with --opt command=/path/to/openocd",
+                    )
+            })?;
+
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        let tcl = loop {
+            if let Ok(stream) = TcpStream::connect((Ipv4Addr::LOCALHOST, port)) {
+                break BufReader::new(stream);
+            }
+            match openocd.try_wait()? {
+                Some(status) => {
+                    let detail = tail_of(&log);
+                    return Err(Response::error(
+                        ErrorKind::Device,
+                        format!(
+                            "openocd exited ({status}) before accepting a connection:\n{detail}"
+                        ),
+                    ));
+                }
+                None if Instant::now() >= deadline => {
+                    let _ = openocd.kill();
+                    let _ = openocd.wait();
+                    let detail = tail_of(&log);
+                    return Err(Response::error(
+                        ErrorKind::Device,
+                        format!(
+                            "openocd did not open its TCL port within {}s:\n{detail}",
+                            STARTUP_TIMEOUT.as_secs()
+                        ),
+                    ));
+                }
+                None => std::thread::sleep(STARTUP_POLL),
+            }
+        };
+
+        let mut session = Session {
+            openocd,
+            tcl,
+            log,
+            flash,
+        };
+        // Flash operations need a halted target, and holding it halted for the
+        // session keeps every later request working the same way.
+        session.run("halt")?;
+        Ok(session)
+    }
+
+    /// Send one command and return its reply, whether or not it succeeded.
+    fn tcl_cmd(&mut self, cmd: &str) -> Result<TclReply, Response> {
+        // `capture` outside `catch` keeps the status while collecting whatever
+        // the command logged; inside, it would swallow the status.
+        let wrapped = format!(
+            r#"set log [capture {{set rc [catch {{{cmd}}} msg]}}]; return "$rc{FIELD}$msg{FIELD}$log""#
+        );
+        // openocd dying mid-session shows up here as a broken pipe or a short
+        // read; either way its last words are in the log, not in the error.
+        let died = |detail: String| {
+            Response::error(
+                ErrorKind::Device,
+                format!("openocd stopped responding during `{cmd}`: {detail}"),
+            )
+        };
+        let sock = self.tcl.get_mut();
+        sock.write_all(wrapped.as_bytes())
+            .and_then(|()| sock.write_all(&[0x1a]))
+            .and_then(|()| sock.flush())
+            .map_err(|_| died(tail_of(&self.log)))?;
+
+        let mut buf = Vec::new();
+        let read = self
+            .tcl
+            .read_until(0x1a, &mut buf)
+            .map_err(|_| died(tail_of(&self.log)))?;
+        if read == 0 {
+            return Err(died(tail_of(&self.log)));
+        }
+        buf.pop(); // the terminator
+        TclReply::parse(&String::from_utf8_lossy(&buf))
+    }
+
+    /// Send one command and fail if openocd did.
+    fn run(&mut self, cmd: &str) -> Result<TclReply, Response> {
+        let reply = self.tcl_cmd(cmd)?;
+        if reply.failed() {
+            return Err(Response::error(
+                ErrorKind::Device,
+                format!("openocd: {}", reply.message()),
+            ));
+        }
+        Ok(reply)
+    }
+}
+
+impl Drop for Session {
+    /// Without this, a transport that dies before `Close` leaves openocd
+    /// holding the debug adapter, and the next run fails with the probe busy.
+    fn drop(&mut self) {
+        let _ = self.openocd.kill();
+        let _ = self.openocd.wait();
+    }
+}
+
+/// The last 4 KiB of openocd's log
+fn tail_of(log: &NamedTempFile) -> String {
+    const TAIL: u64 = 4096;
+    let Ok(mut file) = log.reopen() else {
+        return String::from("(no log)");
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if len > TAIL {
+        let _ = file.seek(std::io::SeekFrom::Start(len - TAIL));
+    }
+    let mut text = String::new();
+    let _ = file.read_to_string(&mut text);
+    let text = text.trim();
+    if text.is_empty() {
+        String::from("(openocd logged nothing)")
+    } else {
+        text.to_string()
+    }
+}
+
+#[derive(Default)]
 pub struct OpenocdTransport {
-    openocd: Option<Child>,
-    tcl_conn: Option<BufReader<TcpStream>>,
+    session: Option<Session>,
 }
 
 impl OpenocdTransport {
-    fn new() -> std::io::Result<Self> {
-        Ok(Self {
-            openocd: None,
-            tcl_conn: None,
-        })
-    }
-
-    fn spawn_openocd(&mut self, configs: &[String]) -> Response {
-        let tcp_probe = TcpListener::bind("localhost:0").expect("oops");
-        let port = tcp_probe.local_addr().expect("oops").port();
-        drop(tcp_probe);
-
-        let mut cmd = Command::new("openocd");
-        cmd.args(configs.iter().flat_map(|c| ["-f", c]))
-            .arg("-c")
-            .arg(format!("tcl_port {port}"))
-            .arg("-c")
-            .arg("debug_level 4; init; halt")
-            .stderr(Stdio::piped());
-        match cmd.spawn() {
-            Ok(mut pid) => loop {
-                if let Ok(tcl_conn) = TcpStream::connect(("localhost", port)) {
-                    self.tcl_conn = Some(BufReader::new(tcl_conn));
-                    self.openocd = Some(pid);
-                    return Response::Ok;
-                } else {
-                    if pid.try_wait().expect("oops").is_some() {
-                        let mut buf = String::new();
-                        pid.stderr.unwrap().read_to_string(&mut buf).unwrap();
-                        return Response::error(ErrorKind::Device, buf);
-                    } else {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                }
-            },
-            Err(e) => Response::error(ErrorKind::Device, format!("{e}")),
+    fn open(&mut self, flash: FlashInfo, options: Options<'_>) -> Result<(), Response> {
+        // Replace any previous session, so its openocd is killed by Drop.
+        self.session = None;
+        let configs = resolve_configs(&options);
+        if configs.is_empty() {
+            return Err(Response::error(
+                ErrorKind::Selection,
+                "the openocd transport needs at least one openocd config file",
+            )
+            .with_suggestion(
+                "add --opt config=board/nordic_nrf52_dk.cfg\n\
+                 or give the board file a [connection.openocd] config = [...] entry",
+            ));
         }
+        let command = options.get_str("command").unwrap_or("openocd");
+        let debug_level = options
+            .get("debug_level")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(2);
+        self.session = Some(Session::start(command, &configs, debug_level, flash)?);
+        Ok(())
     }
 
-    fn tcl_cmd(&mut self, cmd: &str) -> Option<std::io::Result<(bool, String)>> {
-        self.tcl_conn.as_mut().map(|sock| {
-            let wrapped = format!(
-                r#"set log [capture {{set rc [catch {{{cmd}}} msg]}}]; return "$rc\x1f$log""#
-            );
-            sock.get_mut().write_all(wrapped.as_bytes())?;
-            sock.get_mut().write_all(&[0x1a])?;
-            sock.get_mut().flush()?;
-            let mut buf = Vec::new();
-            sock.read_until(0x1a, &mut buf)?;
-            buf.pop(); // drop the terminator
-            let response_line = String::from_utf8_lossy(&buf).into_owned();
-            let (status, response) =
-                response_line
-                    .split_once('\x1f')
-                    .ok_or(std::io::Error::other(format!(
-                        "unexpected tcl response: {response_line}"
-                    )))?;
-            eprintln!("Status {status}");
-            Ok((status == "0", response.to_string()))
-        })
+    fn session(&mut self) -> Result<&mut Session, Response> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| Response::error(ErrorKind::InvalidRequest, "not open"))
     }
-}
 
-impl Handler for OpenocdTransport {
-    fn handle(&mut self, request: Request, payload: Vec<u8>) -> (Response, Vec<u8>) {
+    fn read(&mut self, address: u64, len: u64) -> Result<Vec<u8>, Response> {
+        let session = self.session()?;
+        let scratch = NamedTempFile::new()?;
+        let path = scratch.path().display().to_string();
+        session.run(&format!("dump_image {path} {address:#x} {len}"))?;
+
+        let mut data = Vec::new();
+        // Reopen rather than reusing the handle: openocd wrote this file
+        // behind our back, and the fresh descriptor cannot be stale.
+        scratch.reopen()?.read_to_end(&mut data)?;
+        if data.len() as u64 != len {
+            return Err(Response::error(
+                ErrorKind::Device,
+                format!(
+                    "openocd dumped {} bytes of the {len} requested at {address:#x}",
+                    data.len()
+                ),
+            ));
+        }
+        Ok(data)
+    }
+
+    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Response> {
+        let session = self.session()?;
+        check_whole_pages(&session.flash, address, data.len() as u64)?;
+
+        let mut scratch = NamedTempFile::new()?;
+        scratch.write_all(data)?;
+        scratch.flush()?;
+        let path = scratch.path().display().to_string();
+        session.run(&format!("flash write_image erase {path} {address:#x} bin"))?;
+        Ok(())
+    }
+
+    fn dispatch(
+        &mut self,
+        request: Request,
+        payload: Vec<u8>,
+    ) -> Result<(Response, Vec<u8>), Response> {
         match request {
-            Request::Hello { .. } => (
+            Request::Hello { .. } => Ok((
                 Response::Hello {
                     protocol: tock_proto::PROTOCOL_VERSION,
                     transport: "openocd".into(),
@@ -93,107 +388,138 @@ impl Handler for OpenocdTransport {
                     ],
                 },
                 vec![],
-            ),
-            Request::Open { options, .. } => {
-                let configs: Vec<String> = options
-                    .get("config")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or(vec![]);
-                (self.spawn_openocd(&configs), vec![])
+            )),
+            Request::Open {
+                flash,
+                options,
+                option_sources,
+                ..
+            } => {
+                self.open(flash, Options::new(&options, &option_sources))?;
+                Ok((Response::Ok, vec![]))
             }
-            Request::Read { address, len } => {
-                let mut scratch_file = NamedTempFile::new().unwrap();
-                let d = self.tcl_cmd(
-                    format!(
-                        "dump_image {} {address:#x} {len}",
-                        scratch_file.path().to_string_lossy()
-                    )
-                    .as_str(),
-                );
-                if let Some(Ok((true, _resp))) = d {
-                    let mut buf = vec![];
-                    let _ = scratch_file.read_to_end(&mut buf);
-                    (Response::Data, buf)
-                } else {
-                    (
-                        Response::error(ErrorKind::InvalidRequest, "not ready"),
-                        vec![],
-                    )
-                }
-            }
+            Request::Read { address, len } => Ok((Response::Data, self.read(address, len)?)),
             Request::Write { address } => {
-                let mut scratch_file = NamedTempFile::new().unwrap();
-                scratch_file.write_all(&payload).unwrap();
-                scratch_file.flush().unwrap();
-
-                let d = self.tcl_cmd(
-                    format!(
-                        "flash write_image erase {} {address:#x} bin",
-                        scratch_file.path().to_string_lossy()
-                    )
-                    .as_str(),
-                );
-                if let Some(Ok((true, _resp))) = d {
-                    (Response::Ok, vec![])
-                } else {
-                    (
-                        Response::error(ErrorKind::InvalidRequest, "not ready"),
-                        vec![],
-                    )
-                }
+                self.write(address, &payload)?;
+                Ok((Response::Ok, vec![]))
             }
+            // `reset halt`, not `reset`: a bare reset resumes the target, and
+            // every other request here assumes it is halted.
             Request::Reset => {
-                let d = self.tcl_cmd("reset");
-                if let Some(Ok((true, _resp))) = d {
-                    (Response::Ok, vec![])
-                } else {
-                    (
-                        Response::error(ErrorKind::InvalidRequest, "not ready"),
-                        vec![],
-                    )
-                }
+                self.session()?.run("reset halt")?;
+                Ok((Response::Ok, vec![]))
             }
             Request::Close => {
-                if let Some(mut child) = self.openocd.take() {
-                    match child.kill() {
-                        Ok(()) => (Response::Ok, vec![]),
-                        Err(e) => (
-                            Response::error(
-                                ErrorKind::Device,
-                                format!("openocd failed to close {child:?}: {e}"),
-                            ),
-                            vec![],
-                        ),
-                    }
-                } else {
-                    (
-                        Response::error(
-                            ErrorKind::InvalidRequest,
-                            "openocd transport has nothing to close".to_string(),
-                        ),
-                        vec![],
-                    )
-                }
+                self.session = None; // Drop kills openocd
+                Ok((Response::Ok, vec![]))
             }
-            other => (
-                Response::error(
-                    ErrorKind::Unsupported,
-                    format!("openocd transport does not support {other:?}"),
-                ),
-                vec![],
-            ),
+            other => Err(Response::error(
+                ErrorKind::Unsupported,
+                format!("openocd transport does not support {other:?}"),
+            )),
         }
     }
 }
 
-fn main() -> std::io::Result<()> {
-    let mut transport = OpenocdTransport::new()?;
+impl Handler for OpenocdTransport {
+    fn handle(&mut self, request: Request, payload: Vec<u8>) -> (Response, Vec<u8>) {
+        self.dispatch(request, payload)
+            .unwrap_or_else(|e| (e, vec![]))
+    }
+}
+
+fn main() {
+    let mut transport = OpenocdTransport::default();
     let stdin = std::io::stdin().lock();
     let stdout = std::io::stdout().lock();
     if let Err(e) = tock_proto::serve(stdin, stdout, &mut transport) {
         eprintln!("tock-transport-openocd: {e}");
         std::process::exit(1);
     }
-    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reply(raw: &str) -> TclReply {
+        TclReply::parse(raw).expect("parses")
+    }
+
+    #[test]
+    fn parses_a_plain_status() {
+        let r = reply("0\u{1f}\u{1f}0");
+        assert_eq!(r.rc, 0);
+        assert!(!r.failed());
+    }
+
+    #[test]
+    fn reads_the_code_past_a_tcl_error_prefix() {
+        // A TCL-level error prefixes the status field with openocd's log line.
+        let r = reply("command.c:708: Error: 1\u{1f}Division by zero\u{1f}1\nat file \"x\"");
+        assert_eq!(r.rc, 1);
+        assert_eq!(r.message(), "Division by zero");
+    }
+
+    #[test]
+    fn falls_back_to_the_log_when_there_is_no_message() {
+        let r = reply("-101\u{1f}\u{1f}Debug Adapter has to be specified");
+        assert_eq!(r.rc, -101);
+        assert!(r.failed());
+        assert_eq!(r.message(), "Debug Adapter has to be specified");
+    }
+
+    #[test]
+    fn ignores_a_log_that_is_only_the_status_echo() {
+        // `capture` returns the script's result when the command logged
+        // nothing, and that result is the rc -- which says nothing.
+        let r = reply("-4\u{1f}\u{1f}-4");
+        assert_eq!(r.message(), "openocd returned -4");
+    }
+
+    #[test]
+    fn rejects_a_reply_it_cannot_read() {
+        assert!(TclReply::parse("not a reply").is_err());
+        assert!(TclReply::parse("x\u{1f}y\u{1f}z").is_err());
+    }
+
+    #[test]
+    fn config_entries_resolve_next_to_the_file_that_named_them() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("local.cfg"), "").unwrap();
+
+        // Names a real file beside the board file: use it.
+        assert_eq!(
+            resolve_config_entry("local.cfg", Some(dir.path())),
+            dir.path().join("local.cfg").display().to_string()
+        );
+        // Not a file there: leave it for openocd's script search path.
+        assert_eq!(
+            resolve_config_entry("board/nordic_nrf52_dk.cfg", Some(dir.path())),
+            "board/nordic_nrf52_dk.cfg"
+        );
+        // No provenance at all, and absolute paths, pass through.
+        assert_eq!(resolve_config_entry("local.cfg", None), "local.cfg");
+        assert_eq!(
+            resolve_config_entry("/a/b.cfg", Some(dir.path())),
+            "/a/b.cfg"
+        );
+    }
+
+    #[test]
+    fn config_accepts_a_bare_string_as_well_as_a_list() {
+        let sources = std::collections::BTreeMap::new();
+        let one = serde_json::json!({"config": "a.cfg"});
+        let many = serde_json::json!({"config": ["a.cfg", "b.cfg"]});
+        let none = serde_json::json!({});
+        assert_eq!(
+            resolve_configs(&Options::new(one.as_object().unwrap(), &sources)),
+            vec!["a.cfg"]
+        );
+        assert_eq!(
+            resolve_configs(&Options::new(many.as_object().unwrap(), &sources)),
+            vec!["a.cfg", "b.cfg"]
+        );
+        assert!(resolve_configs(&Options::new(none.as_object().unwrap(), &sources)).is_empty());
+    }
 }

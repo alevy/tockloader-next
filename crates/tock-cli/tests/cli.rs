@@ -664,3 +664,56 @@ fn a_non_utf8_environment_variable_does_not_break_the_tool() {
     assert!(!err.contains("panicked"), "{err}");
     ok(out);
 }
+
+#[test]
+fn the_broker_rejects_requests_outside_flash() {
+    use tock_proto::{Channel, Request, Response, StreamChannel};
+    let d = Dir::new("broker_bounds");
+    d.erased("flash.bin");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(on_file("path=flash.bin", &["broker"]))
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("none.toml"))
+        .env("TOCK_PROJECT", d.path("Tock.toml"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ch = StreamChannel {
+        reader: child.stdout.take().unwrap(),
+        writer: child.stdin.take().unwrap(),
+    };
+    // nrf52840dk flash is 1 MiB at 0; an external subcommand asking past the
+    // end must be refused here, not forwarded to the transport.
+    let (r, _) = ch
+        .call(
+            &Request::Read {
+                address: 0x20_0000,
+                len: 16,
+            },
+            &[],
+        )
+        .unwrap();
+    match r {
+        // Naming the board is how we know the broker refused it rather than
+        // relaying a transport's complaint: the transport knows no board name.
+        Response::Error { message, .. } => {
+            assert!(message.contains("outside flash"), "{message}");
+            assert!(message.contains("nrf52840dk"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    // A partial-page write is likewise not the transport's problem to discover.
+    let (r, _) = ch
+        .call(&Request::Write { address: 0x40000 }, &[0u8; 8])
+        .unwrap();
+    match r {
+        Response::Error { message, .. } => {
+            assert!(message.contains("whole pages"), "{message}");
+            assert!(message.contains("nrf52840dk"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    ch.call_ok(&Request::Close, &[]).unwrap();
+    assert!(child.wait().unwrap().success());
+}

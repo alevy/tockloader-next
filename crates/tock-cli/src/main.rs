@@ -529,6 +529,34 @@ fn broker(g: &Global) -> Result<(), CliError> {
     let ctx = load_context(g)?;
     struct Broker {
         device: Device,
+        board: String,
+        flash: tock_proto::FlashInfo,
+    }
+    impl Broker {
+        /// External subcommands reach the device through here, so this is
+        /// where their requests are checked. The transport cannot do it as
+        /// well: it is never told which board it is talking to, so it could
+        /// not say which one the address is outside of.
+        fn check(&self, request: &tock_proto::Request, payload: &[u8]) -> Option<String> {
+            let (address, len, whole_pages) = match *request {
+                tock_proto::Request::Read { address, len } => (address, len, false),
+                tock_proto::Request::Write { address } => (address, payload.len() as u64, true),
+                _ => return None,
+            };
+            let (start, size, page) = (self.flash.start, self.flash.size, self.flash.page_size);
+            let board = &self.board;
+            if address < start || address + len > start + size {
+                return Some(format!(
+                    "{address:#x}+{len} is outside flash on {board} ({start:#x} +{size:#x})"
+                ));
+            }
+            if whole_pages && (!address.is_multiple_of(page) || !len.is_multiple_of(page)) {
+                return Some(format!(
+                    "writes must be whole pages; {board} has {page}-byte pages,                      and this is {len} bytes at {address:#x}"
+                ));
+            }
+            None
+        }
     }
     impl tock_proto::Handler for Broker {
         fn handle(
@@ -537,6 +565,12 @@ fn broker(g: &Global) -> Result<(), CliError> {
             payload: Vec<u8>,
         ) -> (tock_proto::Response, Vec<u8>) {
             use tock_proto::{Request as Rq, Response as Rs};
+            if let Some(problem) = self.check(&request, &payload) {
+                return (
+                    Rs::error(tock_proto::ErrorKind::InvalidRequest, problem),
+                    vec![],
+                );
+            }
             match request {
                 Rq::Hello { .. } => (
                     Rs::Hello {
@@ -557,7 +591,14 @@ fn broker(g: &Global) -> Result<(), CliError> {
             }
         }
     }
+    let layout = &ctx.board.layout;
     let mut broker = Broker {
+        board: ctx.board.board.name.clone(),
+        flash: tock_proto::FlashInfo {
+            start: layout.flash.start.0,
+            size: layout.flash.size.0,
+            page_size: layout.flash.page_size.0,
+        },
         device: Device::connect(&ctx, g.trace_protocol)?,
     };
     tock_proto::serve(

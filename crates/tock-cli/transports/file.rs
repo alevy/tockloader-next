@@ -72,11 +72,10 @@ impl FileTransport {
         let (file, flash) = self.require_open()?;
         check_range(flash, address, len)?;
         let mut out = vec![0xFF; len as usize];
-        file.seek(SeekFrom::Start(address - flash.start))
-            .map_err(io)?;
+        file.seek(SeekFrom::Start(address - flash.start))?;
         let mut filled = 0;
         while filled < out.len() {
-            match file.read(&mut out[filled..]).map_err(io)? {
+            match file.read(&mut out[filled..])? {
                 0 => break,
                 n => filled += n,
             }
@@ -95,9 +94,8 @@ impl FileTransport {
                 "writes must be whole pages",
             ));
         }
-        file.seek(SeekFrom::Start(address - flash.start))
-            .map_err(io)?;
-        file.write_all(data).map_err(io)?;
+        file.seek(SeekFrom::Start(address - flash.start))?;
+        file.write_all(data)?;
         Ok(())
     }
 
@@ -117,10 +115,6 @@ fn check_range(flash: &FlashInfo, address: u64, len: u64) -> Result<(), Response
         ));
     }
     Ok(())
-}
-
-fn io(e: std::io::Error) -> Response {
-    Response::error(ErrorKind::Device, e.to_string())
 }
 
 impl Handler for FileTransport {

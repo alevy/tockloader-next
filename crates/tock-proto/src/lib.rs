@@ -84,12 +84,24 @@ impl<'a> Options<'a> {
         Options { values, sources }
     }
 
+    /// The raw value, for option shapes the typed accessors do not cover --
+    /// a list, say. Prefer `get_str` / `get_bool` / `get_path`.
+    pub fn get(&self, key: &str) -> Option<&'a serde_json::Value> {
+        self.values.get(key)
+    }
+
     pub fn get_str(&self, key: &str) -> Option<&'a str> {
         self.values.get(key).and_then(|v| v.as_str())
     }
 
     pub fn get_bool(&self, key: &str) -> Option<bool> {
         self.values.get(key).and_then(|v| v.as_bool())
+    }
+
+    /// The directory a value for `key` was written in, for options whose
+    /// shape `get_path` cannot handle -- a list of paths, say.
+    pub fn base_dir(&self, key: &str) -> Option<PathBuf> {
+        self.sources.get(key).map(|s| PathBuf::from(&s.base))
     }
 
     /// A path option, resolved against the directory of the file it was
@@ -217,6 +229,16 @@ pub enum ProtoError {
     Unexpected(Box<Response>),
 }
 
+/// An I/O failure inside a transport is a device error. Having the conversion
+/// here means a transport can use `?` on ordinary `std::io` calls and return
+/// `Result<_, Response>` throughout, instead of each one inventing its own
+/// error plumbing.
+impl From<std::io::Error> for Response {
+    fn from(e: std::io::Error) -> Response {
+        Response::error(ErrorKind::Device, e.to_string())
+    }
+}
+
 /// Something that answers requests: a transport, or the broker.
 pub trait Handler {
     fn handle(&mut self, request: Request, payload: Vec<u8>) -> (Response, Vec<u8>);
@@ -329,6 +351,19 @@ impl Response {
             suggestion: None,
         }
     }
+
+    /// Attach the line the CLI prints as `try: ...`. A no-op on any response
+    /// that is not an error.
+    pub fn with_suggestion(self, hint: impl Into<String>) -> Response {
+        match self {
+            Response::Error { kind, message, .. } => Response::Error {
+                kind,
+                message,
+                suggestion: Some(hint.into()),
+            },
+            other => other,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -384,6 +419,31 @@ mod tests {
         assert_eq!(s, r#"{"op":"read","address":16,"len":4}"#);
         let s = serde_json::to_string(&Capability::Vendor("acme.provision".into())).unwrap();
         assert_eq!(s, r#"{"vendor":"acme.provision"}"#);
+    }
+
+    #[test]
+    fn base_dir_exposes_the_directory_a_value_was_written_in() {
+        let values = serde_json::json!({"config": ["a.cfg"], "chip": "X"});
+        let mut sources = BTreeMap::new();
+        sources.insert("config".to_string(), at("/repo"));
+        let o = Options::new(values.as_object().unwrap(), &sources);
+        // A list-valued option can resolve its own elements.
+        assert_eq!(o.base_dir("config"), Some(PathBuf::from("/repo")));
+        // No provenance recorded for this key.
+        assert_eq!(o.base_dir("chip"), None);
+    }
+
+    #[test]
+    fn io_errors_convert_into_device_responses() {
+        let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope");
+        let r: Response = e.into();
+        match r {
+            Response::Error { kind, message, .. } => {
+                assert_eq!(kind, ErrorKind::Device);
+                assert!(message.contains("nope"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
