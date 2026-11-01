@@ -15,10 +15,12 @@
 
 mod flash;
 mod planner;
+mod ranges;
 mod render;
 
 pub use flash::{Flash, NeedRead};
 pub use planner::{Action, NewApp, Plan, PlanError, Request, Slot, plan};
+pub use ranges::coalesce;
 pub use render::{PageWrite, render};
 
 use serde::{Deserialize, Serialize};
