@@ -143,7 +143,7 @@ pub enum Request {
         address: u64,
         len: u64,
     },
-    /// Payload: page-aligned data, whole pages.
+    /// Payload: the bytes to write. Any address, any length.
     Write {
         address: u64,
     },

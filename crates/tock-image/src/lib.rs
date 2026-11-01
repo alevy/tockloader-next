@@ -155,15 +155,25 @@ pub fn discover(region: &Region, flash: &Flash) -> Result<Discovered, NeedRead> 
         if address + 8 > region.end() {
             break ListEnd::Terminated;
         }
-        let lengths = Lengths::parse(&flash.read(address, 8)?);
-        let Some(lengths) = lengths else {
+        // Ask for the whole header in one go, not 8 bytes and then the rest:
+        // the two requests come from different calls, so nothing downstream
+        // can merge them, and each one is a device round trip. The extra
+        // bytes are nearly free; the round trip is not.
+        let probe = COALESCE_GAP.min(region.end() - address);
+        let head = flash.read(address, probe)?;
+        let Some(lengths) = Lengths::parse(&head[..8]) else {
             break ListEnd::Terminated;
         };
         let total = lengths.total_size as u64;
         if address + total > region.end() {
             break ListEnd::Overrun;
         }
-        let bytes = flash.read(address, lengths.header_size as u64)?;
+        let header_size = lengths.header_size as u64;
+        let bytes = if header_size <= probe {
+            head[..header_size as usize].to_vec()
+        } else {
+            flash.read(address, header_size)?
+        };
         match Header::parse(&bytes) {
             Ok(header) if header.is_app() => entries.push(Entry::App { address, header }),
             Ok(_) => entries.push(Entry::Padding {

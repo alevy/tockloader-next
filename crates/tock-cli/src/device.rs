@@ -208,6 +208,18 @@ impl Device {
                 .channel
                 .call_ok(&Request::Read { address, len }, &[])
                 .map_err(proto)?;
+            // A short reply would leave the caller's read loop asking for the
+            // same bytes forever. Say so instead of hanging.
+            if data.len() as u64 != len {
+                return Err(CliError::new(
+                    Code::Device,
+                    format!(
+                        "transport `{}` returned {} of the {len} bytes asked for at {address:#x}",
+                        self.transport,
+                        data.len()
+                    ),
+                ));
+            }
             out.push((address, data));
         }
         Ok(out)
@@ -264,5 +276,35 @@ pub fn proto(e: ProtoError) -> CliError {
             err
         }
         e => CliError::new(Code::Device, e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Answers every read with fewer bytes than asked for.
+    struct Stingy;
+    impl Channel for Stingy {
+        fn call(
+            &mut self,
+            _request: &Request,
+            _payload: &[u8],
+        ) -> Result<(Response, Vec<u8>), ProtoError> {
+            Ok((Response::Data, vec![0xFF; 4]))
+        }
+    }
+
+    #[test]
+    fn a_short_read_is_an_error_not_a_silent_retry() {
+        let mut device = Device {
+            channel: Box::new(Stingy),
+            child: None,
+            transport: "stingy".into(),
+            capabilities: vec![Capability::MemoryRead],
+        };
+        // `with_reads` would ask again forever if this came back Ok.
+        let err = device.read_ranges(&[(0x1000, 64)]).unwrap_err();
+        assert!(format!("{err:?}").contains("4"), "{err:?}");
     }
 }

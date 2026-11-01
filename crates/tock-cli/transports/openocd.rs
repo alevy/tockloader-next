@@ -89,6 +89,32 @@ impl TclReply {
     }
 }
 
+/// The erase unit, checked. A value that cannot be an erase unit is worse
+/// than a missing one: zero divides by zero in [`sector_span`], and a
+/// non-power-of-two straddles the device's real sectors, so `erase` destroys
+/// bytes the core never sent.
+fn page_size_from(configured: Option<u64>) -> Result<u64, Response> {
+    let missing = || {
+        Response::error(
+            ErrorKind::Selection,
+            "the openocd transport needs the flash erase unit",
+        )
+        .with_suggestion(
+            "add --opt page_size=4096\n\
+             or give the board file a [connection.openocd] page_size entry",
+        )
+    };
+    match configured {
+        None => Err(missing()),
+        Some(v) if v == 0 || !v.is_power_of_two() => Err(Response::error(
+            ErrorKind::Selection,
+            format!("page_size {v} cannot be a flash erase unit: it must be a power of two"),
+        )
+        .with_suggestion("check [connection.openocd] page_size, e.g. page_size = 4096")),
+        Some(v) => Ok(v),
+    }
+}
+
 /// The sectors a write touches, as `(address, len)`, or `None` when it writes
 /// nothing. Everything inside this span is erased by `flash write_image
 /// erase`, so everything inside it has to be rewritten.
@@ -378,16 +404,7 @@ impl OpenocdTransport {
             .unwrap_or(2);
         // No default: guessing an erase unit is how a write silently takes a
         // neighbour with it.
-        let Some(page_size) = options.get("page_size").and_then(|v| v.as_u64()) else {
-            return Err(Response::error(
-                ErrorKind::Selection,
-                "the openocd transport needs the flash erase unit",
-            )
-            .with_suggestion(
-                "add --opt page_size=4096\n\
-                 or give the board file a [connection.openocd] page_size entry",
-            ));
-        };
+        let page_size = page_size_from(options.get("page_size").and_then(|v| v.as_u64()))?;
         self.session = Some(Session::start(command, &configs, debug_level, page_size)?);
         Ok(())
     }
@@ -496,6 +513,17 @@ mod tests {
 
     fn reply(raw: &str) -> TclReply {
         TclReply::parse(raw).expect("parses")
+    }
+
+    #[test]
+    fn a_page_size_that_cannot_be_an_erase_unit_is_refused() {
+        // Zero would divide by zero in sector_span; a non-power-of-two
+        // silently straddles real sectors and erases the neighbours.
+        assert!(page_size_from(Some(4096)).is_ok());
+        assert!(page_size_from(Some(2048)).is_ok());
+        assert!(page_size_from(Some(0)).is_err());
+        assert!(page_size_from(Some(1000)).is_err());
+        assert!(page_size_from(None).is_err());
     }
 
     #[test]

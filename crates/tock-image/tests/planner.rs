@@ -385,10 +385,12 @@ fn discovery_asks_only_for_what_it_needs() {
     let full = b.flash();
     let mut partial = Flash::new(&b.region);
     let mut bytes_read = 0u64;
+    let mut rounds = 0usize;
     let found = loop {
         match discover(&b.region, &partial) {
             Ok(f) => break f,
             Err(NeedRead { ranges }) => {
+                rounds += 1;
                 for (address, len) in ranges {
                     bytes_read += len;
                     partial.insert(address, &full.read(address, len).unwrap());
@@ -400,6 +402,15 @@ fn discovery_asks_only_for_what_it_needs() {
     // Headers and the terminator, not pages around them, and nowhere near the
     // whole 256 KiB region.
     assert!(bytes_read < 1024, "read {bytes_read} bytes");
+    // Bytes are not the only cost: each round is a device round trip, and over
+    // openocd that is a dump_image and a temp file. One per app, plus the
+    // terminator -- not two per app because the lengths and the header were
+    // asked for separately.
+    assert!(
+        rounds <= found.apps().count() + 1,
+        "{rounds} round trips for {} apps",
+        found.apps().count()
+    );
 }
 
 #[test]
