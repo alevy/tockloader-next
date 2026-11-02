@@ -543,9 +543,10 @@ fn broker(g: &Global) -> Result<(), CliError> {
     }
     impl Broker {
         /// External subcommands reach the device through here, so this is
-        /// where their requests are checked. The transport cannot do it as
-        /// well: it is never told which board it is talking to, so it could
-        /// not say which one the address is outside of.
+        /// where their requests are checked. Transports check their own
+        /// bounds too -- they are separately spawnable -- but only the broker
+        /// knows which board it is, so only the broker can say which one the
+        /// address is outside of.
         fn check(&self, request: &tock_proto::Request, payload: &[u8]) -> Option<String> {
             let (address, len) = match *request {
                 tock_proto::Request::Read { address, len } => (address, len),

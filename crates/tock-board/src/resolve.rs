@@ -254,7 +254,7 @@ fn parse_option_value(raw: &str) -> toml::Value {
 /// The environment variable an option key is read from. Option keys are
 /// snake_case, so this is case alone: `chip_name` is `TOCK_OPT_CHIP_NAME`,
 /// and every key is reachable from the environment.
-pub fn env_option_var(key: &str) -> String {
+fn env_option_var(key: &str) -> String {
     format!("TOCK_OPT_{}", key.to_uppercase())
 }
 

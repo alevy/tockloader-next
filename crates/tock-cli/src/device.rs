@@ -8,10 +8,7 @@ use std::process::{Child, Command, Stdio};
 
 use tock_board::Context;
 use tock_image::{COALESCE_GAP, WriteRun, coalesce};
-use tock_proto::{
-    Capability, Channel, FlashInfo, OptionLayer, OptionSource, ProtoError, Request, Response,
-    StreamChannel,
-};
+use tock_proto::{Capability, Channel, FlashInfo, ProtoError, Request, Response, StreamChannel};
 
 use crate::error::{CliError, Code};
 
@@ -22,16 +19,15 @@ pub struct Device {
     pub capabilities: Vec<Capability>,
 }
 
-/// Where each resolved option was written, for transports that need to make
-/// sense of a relative value. The core never decides what an option *means*,
-/// so this is all it can offer: `base` is absolute, because a plugin or a
-/// `tock broker` client does not reliably share our working directory.
-fn option_sources(ctx: &Context, cwd: &Path) -> BTreeMap<String, OptionSource> {
-    // A board reference like `bundled:nrf52840dk` is not a file and has no
-    // directory; values from one cannot be machine-specific paths anyway.
-    let as_file = |origin: &str| (!origin.starts_with("bundled:")).then(|| origin.to_string());
+/// The directory each resolved option was written in. The core never decides
+/// what an option *means*, so this is all it can offer a transport that needs
+/// to resolve a relative path. Absolute, because a plugin or a `tock broker`
+/// client does not reliably share our working directory.
+fn option_bases(ctx: &Context, cwd: &Path) -> BTreeMap<String, String> {
     let dir_of = |origin: Option<&String>| {
-        let Some(path) = origin.map(Path::new) else {
+        // A board reference like `bundled:nrf52840dk` is not a file and has no
+        // directory; values from one cannot be relative paths anyway.
+        let Some(path) = origin.filter(|o| !o.starts_with("bundled:")).map(Path::new) else {
             return cwd.to_path_buf();
         };
         let absolute = if path.is_absolute() {
@@ -46,16 +42,18 @@ fn option_sources(ctx: &Context, cwd: &Path) -> BTreeMap<String, OptionSource> {
         .options
         .iter()
         .map(|(key, sourced)| {
-            let (layer, file) = match &sourced.source {
-                tock_board::Source::Flag(_) => (OptionLayer::Flag, None),
-                tock_board::Source::Env(_) => (OptionLayer::Env, None),
-                tock_board::Source::Device(_) => (OptionLayer::Device, ctx.user.clone()),
-                tock_board::Source::Project(o) => (OptionLayer::Project, Some(o.clone())),
-                tock_board::Source::User(o) => (OptionLayer::User, Some(o.clone())),
-                tock_board::Source::Board(o) => (OptionLayer::Board, as_file(o)),
+            let origin = match &sourced.source {
+                // Flags and the environment are written at a prompt, not in a
+                // file, so their base is wherever the command was run.
+                tock_board::Source::Flag(_) | tock_board::Source::Env(_) => None,
+                // An alias records only its own name, so the file it was
+                // written in is the user config.
+                tock_board::Source::Device(_) => ctx.user.as_ref(),
+                tock_board::Source::Project(o)
+                | tock_board::Source::User(o)
+                | tock_board::Source::Board(o) => Some(o),
             };
-            let base = dir_of(file.as_ref()).display().to_string();
-            (key.clone(), OptionSource { layer, file, base })
+            (key.clone(), dir_of(origin).display().to_string())
         })
         .collect()
 }
@@ -172,7 +170,7 @@ impl Device {
             arch: ctx.board.board.arch.clone(),
             flash,
             options: options.as_object().cloned().unwrap_or_default(),
-            option_sources: option_sources(ctx, &cwd),
+            option_bases: option_bases(ctx, &cwd),
         };
         channel.call_ok(&open, &[]).map_err(proto)?;
         Ok(Device {

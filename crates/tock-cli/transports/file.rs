@@ -33,7 +33,10 @@ impl FileTransport {
             };
         };
         let path = path.display().to_string();
-        let create = options.get_bool("create").unwrap_or(false);
+        let create = options
+            .get("create")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let exists = std::path::Path::new(&path).exists();
         if !exists && !create {
             return Response::Error {
@@ -99,6 +102,9 @@ impl FileTransport {
     }
 }
 
+/// Keep an access inside the image. The broker checks this too, with a better
+/// message, but a transport is a separate executable: anyone who can spawn it
+/// can talk to it, with no broker in front.
 fn check_range(flash: &FlashInfo, address: u64, len: u64) -> Result<(), Response> {
     if address < flash.start || address + len > flash.start + flash.size {
         return Err(Response::error(
@@ -124,10 +130,10 @@ impl Handler for FileTransport {
             Request::Open {
                 flash,
                 options,
-                option_sources,
+                option_bases,
                 ..
             } => Ok((
-                self.open(flash, Options::new(&options, &option_sources)),
+                self.open(flash, Options::new(&options, &option_bases)),
                 vec![],
             )),
             Request::Read { address, len } => self.read(address, len).map(|d| (Response::Data, d)),

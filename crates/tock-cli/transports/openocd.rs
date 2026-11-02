@@ -397,7 +397,10 @@ impl OpenocdTransport {
                  or give the board file a [connection.openocd] config = [...] entry",
             ));
         }
-        let command = options.get_str("command").unwrap_or("openocd");
+        let command = options
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("openocd");
         let debug_level = options
             .get("debug_level")
             .and_then(|v| v.as_i64())
@@ -461,10 +464,10 @@ impl OpenocdTransport {
             )),
             Request::Open {
                 options,
-                option_sources,
+                option_bases,
                 ..
             } => {
-                self.open(Options::new(&options, &option_sources))?;
+                self.open(Options::new(&options, &option_bases))?;
                 Ok((Response::Ok, vec![]))
             }
             Request::Read { address, len } => Ok((Response::Data, self.read(address, len)?)),
@@ -611,18 +614,18 @@ mod tests {
 
     #[test]
     fn config_accepts_a_bare_string_as_well_as_a_list() {
-        let sources = std::collections::BTreeMap::new();
+        let bases = std::collections::BTreeMap::new();
         let one = serde_json::json!({"config": "a.cfg"});
         let many = serde_json::json!({"config": ["a.cfg", "b.cfg"]});
         let none = serde_json::json!({});
         assert_eq!(
-            resolve_configs(&Options::new(one.as_object().unwrap(), &sources)),
+            resolve_configs(&Options::new(one.as_object().unwrap(), &bases)),
             vec!["a.cfg"]
         );
         assert_eq!(
-            resolve_configs(&Options::new(many.as_object().unwrap(), &sources)),
+            resolve_configs(&Options::new(many.as_object().unwrap(), &bases)),
             vec!["a.cfg", "b.cfg"]
         );
-        assert!(resolve_configs(&Options::new(none.as_object().unwrap(), &sources)).is_empty());
+        assert!(resolve_configs(&Options::new(none.as_object().unwrap(), &bases)).is_empty());
     }
 }
