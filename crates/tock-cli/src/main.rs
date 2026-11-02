@@ -2,7 +2,6 @@
 
 mod device;
 mod error;
-mod file_transport;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -265,10 +264,7 @@ fn config_show(g: &Global) -> Result<(), CliError> {
     println!("board      {}  ({})", b.board.name, ctx.board_file.value);
     println!("           from {}", ctx.board_file.source);
     println!("arch       {}", b.board.arch);
-    println!(
-        "flash      {:#x} +{:#x}, {} byte pages",
-        l.flash.start.0, l.flash.size.0, l.flash.page_size.0
-    );
+    println!("flash      {:#x} +{:#x}", l.flash.start.0, l.flash.size.0);
     println!("apps       {:#x} +{:#x}", l.apps.start.0, l.apps.size.0);
     println!("placement  {:?}", l.placement);
     println!("transport  {}", ctx.transport.name.value);
@@ -289,7 +285,7 @@ fn config_show(g: &Global) -> Result<(), CliError> {
 // ---------------------------------------------------------------------------
 // App management
 
-/// Run `step` until it stops asking for pages, reading them from the device.
+/// Run `step` until it stops asking for bytes, reading them from the device.
 fn with_reads<T>(
     device: &mut Device,
     flash: &mut Flash,
@@ -298,10 +294,9 @@ fn with_reads<T>(
     loop {
         match step(flash) {
             Ok(v) => return Ok(v),
-            Err(NeedRead { mut pages }) => {
-                pages.sort();
-                for (address, data) in device.read_pages(&pages)? {
-                    flash.insert_page(address, data);
+            Err(NeedRead { ranges }) => {
+                for (address, data) in device.read_ranges(&ranges)? {
+                    flash.insert(address, &data);
                 }
             }
         }
@@ -475,35 +470,48 @@ fn change_apps(
     })?;
 
     if !change.dry_run {
-        device.write_pages(&writes)?;
-        // Verify by reading back.
-        let pages: Vec<u64> = writes.iter().map(|w| w.address).collect();
-        for ((address, got), w) in device.read_pages(&pages)?.into_iter().zip(&writes) {
-            if got != w.data {
+        device.write_runs(&writes)?;
+        // Verify by reading back. Reads coalesce, so a reply can cover several
+        // runs; find the one that contains each and compare that slice.
+        let ranges: Vec<(u64, u64)> = writes
+            .iter()
+            .map(|w| (w.address, w.data.len() as u64))
+            .collect();
+        let read_back = device.read_ranges(&ranges)?;
+        for w in &writes {
+            let end = w.address + w.data.len() as u64;
+            let got = read_back
+                .iter()
+                .find(|(at, data)| *at <= w.address && at + data.len() as u64 >= end)
+                .map(|(at, data)| {
+                    let off = (w.address - at) as usize;
+                    &data[off..off + w.data.len()]
+                });
+            if got != Some(w.data.as_slice()) {
                 return Err(CliError::new(
                     Code::Verify,
-                    format!("page {address:#x} did not verify after writing"),
+                    format!("{:#x} did not verify after writing", w.address),
                 ));
             }
         }
     }
 
     if g.format == Format::Json {
-        let pages: Vec<u64> = writes.iter().map(|w| w.address).collect();
+        let runs: Vec<_> = writes
+            .iter()
+            .map(|w| json!({ "address": w.address, "bytes": w.data.len() }))
+            .collect();
         println!(
             "{}",
-            json!({ "dry_run": change.dry_run, "plan": plan, "pages_written": pages })
+            json!({ "dry_run": change.dry_run, "plan": plan, "writes": runs })
         );
     } else {
         let verb = if change.dry_run { "would" } else { "did" };
         for a in &plan.actions {
             println!("{a}");
         }
-        println!(
-            "{verb} write {} page(s) of {} bytes",
-            writes.len(),
-            region.page_size
-        );
+        let bytes: usize = writes.iter().map(|w| w.data.len()).sum();
+        println!("{verb} write {} byte(s) in {} run(s)", bytes, writes.len());
     }
     Ok(())
 }
@@ -530,6 +538,29 @@ fn broker(g: &Global) -> Result<(), CliError> {
     let ctx = load_context(g)?;
     struct Broker {
         device: Device,
+        board: String,
+        flash: tock_proto::FlashInfo,
+    }
+    impl Broker {
+        /// External subcommands reach the device through here, so this is
+        /// where their requests are checked. The transport cannot do it as
+        /// well: it is never told which board it is talking to, so it could
+        /// not say which one the address is outside of.
+        fn check(&self, request: &tock_proto::Request, payload: &[u8]) -> Option<String> {
+            let (address, len) = match *request {
+                tock_proto::Request::Read { address, len } => (address, len),
+                tock_proto::Request::Write { address } => (address, payload.len() as u64),
+                _ => return None,
+            };
+            let (start, size) = (self.flash.start, self.flash.size);
+            let board = &self.board;
+            if address < start || address + len > start + size {
+                return Some(format!(
+                    "{address:#x}+{len} is outside flash on {board} ({start:#x} +{size:#x})"
+                ));
+            }
+            None
+        }
     }
     impl tock_proto::Handler for Broker {
         fn handle(
@@ -538,6 +569,12 @@ fn broker(g: &Global) -> Result<(), CliError> {
             payload: Vec<u8>,
         ) -> (tock_proto::Response, Vec<u8>) {
             use tock_proto::{Request as Rq, Response as Rs};
+            if let Some(problem) = self.check(&request, &payload) {
+                return (
+                    Rs::error(tock_proto::ErrorKind::InvalidRequest, problem),
+                    vec![],
+                );
+            }
             match request {
                 Rq::Hello { .. } => (
                     Rs::Hello {
@@ -558,7 +595,13 @@ fn broker(g: &Global) -> Result<(), CliError> {
             }
         }
     }
+    let layout = &ctx.board.layout;
     let mut broker = Broker {
+        board: ctx.board.board.name.clone(),
+        flash: tock_proto::FlashInfo {
+            start: layout.flash.start.0,
+            size: layout.flash.size.0,
+        },
         device: Device::connect(&ctx, g.trace_protocol)?,
     };
     tock_proto::serve(

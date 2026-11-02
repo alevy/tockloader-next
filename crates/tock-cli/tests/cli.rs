@@ -200,6 +200,10 @@ fn dry_run_writes_nothing_and_reports_the_plan() {
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["dry_run"], true);
     assert_eq!(v["plan"]["actions"][0]["action"], "install");
+    // Writes are runs of bytes now; reporting bare addresses as "pages" names
+    // the thing this tool no longer has.
+    assert!(v["pages_written"].is_null(), "{v}");
+    assert!(v["writes"][0]["bytes"].as_u64().unwrap() > 0, "{v}");
     assert_eq!(v["plan"]["actions"][0]["address"], 0x40000);
     assert_eq!(std::fs::read(d.path("flash.bin")).unwrap(), before);
 }
@@ -269,6 +273,8 @@ fn errors_say_what_to_run() {
     assert_eq!(out.status.code(), Some(3));
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(err.contains("tock-transport-nosuch"), "{err}");
+    // Nothing is built in any more, so nothing may claim to be.
+    assert!(!err.contains("built-in"), "{err}");
 }
 
 #[test]
@@ -295,30 +301,46 @@ fn needs_repack_suggests_flag() {
 }
 
 #[test]
-fn plugin_transport_matches_built_in() {
-    let d = Dir::new("plugin");
-    d.erased("builtin.bin");
-    d.erased("plugin.bin");
-    let (a, b) = (d.tab("a", 5000, None), d.tab("b", 30000, None));
-    let tabs = [a.to_str().unwrap(), b.to_str().unwrap()];
-    let mut args = on_file("path=builtin.bin", &["install"]);
-    args.extend(tabs);
-    ok(tock(&d, &args));
-    let mut args = vec![
-        "--board",
-        "nrf52840dk",
-        "--transport",
-        "file-plugin",
-        "--opt",
-        "path=plugin.bin",
-        "install",
-    ];
-    args.extend(tabs);
-    ok(tock(&d, &args));
-    assert!(
-        std::fs::read(d.path("builtin.bin")).unwrap()
-            == std::fs::read(d.path("plugin.bin")).unwrap()
-    );
+fn the_file_transport_is_a_standalone_executable() {
+    use tock_proto::{Capability, Channel, Request, Response, StreamChannel};
+    let d = Dir::new("standalone");
+    d.erased("flash.bin");
+
+    // Driven directly, with no `tock` in the picture at all: it is an ordinary
+    // transport executable, not something the core knows about.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tock-transport-file"))
+        .current_dir(&d.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ch = StreamChannel {
+        reader: child.stdout.take().unwrap(),
+        writer: child.stdin.take().unwrap(),
+    };
+    let (hello, _) = ch
+        .call_ok(
+            &Request::Hello {
+                protocol: 0,
+                client: "test".into(),
+            },
+            &[],
+        )
+        .unwrap();
+    match hello {
+        Response::Hello {
+            transport,
+            capabilities,
+            ..
+        } => {
+            assert_eq!(transport, "file");
+            assert!(capabilities.contains(&Capability::MemoryRead));
+            assert!(capabilities.contains(&Capability::MemoryWrite));
+        }
+        other => panic!("{other:?}"),
+    }
+    ch.call_ok(&Request::Close, &[]).unwrap();
+    assert!(child.wait().unwrap().success());
 }
 
 #[test]
@@ -488,7 +510,6 @@ fn project_paths_resolve_against_the_project_file() {
         d.path("Tock.toml"),
         "board = \"nrf52840dk\"\ntransport = \"file\"\n\
          [transports.file]\npath = \"flash.bin\"\n\
-         [transports.file-plugin]\npath = \"flash.bin\"\n\
          [[app]]\ntab = \"app.tab\"\n",
     )
     .unwrap();
@@ -501,12 +522,7 @@ fn project_paths_resolve_against_the_project_file() {
             .collect::<Vec<_>>(),
         vec!["app"]
     );
-    // The plugin path carries provenance across stdio identically.
-    ok(tock_in(
-        &d,
-        "src/deep",
-        &["--transport", "file-plugin", "uninstall", "app"],
-    ));
+    ok(tock_in(&d, "src/deep", &["uninstall", "app"]));
     assert!(list_json(&d, "path=flash.bin").is_empty());
 }
 
@@ -651,4 +667,51 @@ fn a_non_utf8_environment_variable_does_not_break_the_tool() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("panicked"), "{err}");
     ok(out);
+}
+
+#[test]
+fn the_broker_rejects_requests_outside_flash() {
+    use tock_proto::{Channel, Request, Response, StreamChannel};
+    let d = Dir::new("broker_bounds");
+    d.erased("flash.bin");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(on_file("path=flash.bin", &["broker"]))
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("none.toml"))
+        .env("TOCK_PROJECT", d.path("Tock.toml"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ch = StreamChannel {
+        reader: child.stdout.take().unwrap(),
+        writer: child.stdin.take().unwrap(),
+    };
+    // nrf52840dk flash is 1 MiB at 0; an external subcommand asking past the
+    // end must be refused here, not forwarded to the transport.
+    let (r, _) = ch
+        .call(
+            &Request::Read {
+                address: 0x20_0000,
+                len: 16,
+            },
+            &[],
+        )
+        .unwrap();
+    match r {
+        // Naming the board is how we know the broker refused it rather than
+        // relaying a transport's complaint: the transport knows no board name.
+        Response::Error { message, .. } => {
+            assert!(message.contains("outside flash"), "{message}");
+            assert!(message.contains("nrf52840dk"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    // A sub-page write is no longer anyone's business to refuse.
+    let (r, _) = ch
+        .call(&Request::Write { address: 0x40000 }, &[0u8; 8])
+        .unwrap();
+    assert!(matches!(r, Response::Ok), "{r:?}");
+    ch.call_ok(&Request::Close, &[]).unwrap();
+    assert!(child.wait().unwrap().success());
 }

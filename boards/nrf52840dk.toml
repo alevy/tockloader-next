@@ -10,7 +10,7 @@ description = "Nordic nRF52840 DK"
 arch = "cortex-m4"
 
 [layout]
-flash = { start = 0x0000_0000, size = "1M", page_size = "4K" }
+flash = { start = 0x0000_0000, size = "1M" }
 kernel = { start = 0x0000_0000, size = "256K" }
 apps = { start = 0x0004_0000, size = "768K" }
 app_ram = { start = 0x2000_0000, size = "256K" }
@@ -27,6 +27,8 @@ alignment = "size"
 default = "openocd"
 
 [connection.openocd]
+# The erase unit, which only this transport needs to know.
+page_size = 4096
 config = ["board/nordic_nrf52_dk.cfg"]
 
 [connection.probe-rs]

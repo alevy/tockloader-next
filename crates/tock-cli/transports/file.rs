@@ -1,4 +1,4 @@
-//! The `file` transport: a flash image on disk standing in for a board.
+//! `tock-transport-file`: a flash image on disk standing in for a board.
 //!
 //! Replaces Python tockloader's "local board": the file covers the board's
 //! whole flash, starting at `layout.flash.start`.
@@ -72,11 +72,10 @@ impl FileTransport {
         let (file, flash) = self.require_open()?;
         check_range(flash, address, len)?;
         let mut out = vec![0xFF; len as usize];
-        file.seek(SeekFrom::Start(address - flash.start))
-            .map_err(io)?;
+        file.seek(SeekFrom::Start(address - flash.start))?;
         let mut filled = 0;
         while filled < out.len() {
-            match file.read(&mut out[filled..]).map_err(io)? {
+            match file.read(&mut out[filled..])? {
                 0 => break,
                 n => filled += n,
             }
@@ -87,17 +86,8 @@ impl FileTransport {
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Response> {
         let (file, flash) = self.require_open()?;
         check_range(flash, address, data.len() as u64)?;
-        if !address.is_multiple_of(flash.page_size)
-            || !(data.len() as u64).is_multiple_of(flash.page_size)
-        {
-            return Err(Response::error(
-                ErrorKind::InvalidRequest,
-                "writes must be whole pages",
-            ));
-        }
-        file.seek(SeekFrom::Start(address - flash.start))
-            .map_err(io)?;
-        file.write_all(data).map_err(io)?;
+        file.seek(SeekFrom::Start(address - flash.start))?;
+        file.write_all(data)?;
         Ok(())
     }
 
@@ -117,10 +107,6 @@ fn check_range(flash: &FlashInfo, address: u64, len: u64) -> Result<(), Response
         ));
     }
     Ok(())
-}
-
-fn io(e: std::io::Error) -> Response {
-    Response::error(ErrorKind::Device, e.to_string())
 }
 
 impl Handler for FileTransport {
@@ -158,5 +144,15 @@ impl Handler for FileTransport {
             )),
         };
         result.unwrap_or_else(|e| (e, vec![]))
+    }
+}
+
+fn main() {
+    let mut transport = FileTransport::default();
+    let stdin = std::io::stdin().lock();
+    let stdout = std::io::stdout().lock();
+    if let Err(e) = tock_proto::serve(stdin, stdout, &mut transport) {
+        eprintln!("tock-transport-file: {e}");
+        std::process::exit(1);
     }
 }

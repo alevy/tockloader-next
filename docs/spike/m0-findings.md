@@ -11,8 +11,8 @@ criterion) has **not** been done yet; see [What's left](#whats-left).
 | `tbf` | Parse and serialize TBF v2 headers (unknown TLVs kept byte for byte) and read TABs | none | builds |
 | `tock-image` | Pure core: `discover` the app list, `plan` installs and uninstalls, `render` the plan into page writes | none | builds |
 | `tock-board` | Board files (with `extends`), `Tock.toml`, user config, and `resolve` with a recorded source for each value | none (via `FileSource` trait) | builds |
-| `tock-proto` | Draft device protocol: messages, capabilities, framing, in-process and stream carriers | `std::io` traits only | builds |
-| `tock-cli` | The `tock` binary: config, porcelain, broker, external subcommands, built-in `file` transport, and a `tock-transport-file-plugin` example plugin | yes | — |
+| `tock-proto` | Draft device protocol: messages, capabilities, framing, and a stream carrier | `std::io` traits only | builds |
+| `tock-cli` | The `tock` binary (config, porcelain, broker, external subcommands) and `tock-transport-file`, an ordinary transport executable that ships with it | yes | — |
 
 The two reference boards are described in `boards/nrf52840dk.toml` and
 `boards/raspberry_pi_pico_2.toml`.
@@ -61,7 +61,7 @@ function again. This gives three things:
   - Project-file driven install
   - JSON output and `--dry-run`
   - Error messages that include a command to run
-  - The plugin transport produces exactly the same image as the built-in one
+  - The file transport works driven directly, with no `tock` in the picture
   - `tock broker` driven over stdio by a client
 - **Differential tests against Python tockloader** (run when `TOCKLOADER_PY`
   points at it):
@@ -159,11 +159,8 @@ files with it in CI.
 - **Errors:** carry a `kind` (`unsupported`, `selection`, `device`,
   `invalid_request`) and an optional `suggestion` that the CLI turns into a
   "try:" line.
-- **Carriers:**
-  - `StreamChannel` frames over any byte stream (plugins over stdio, and
-    `tock broker`).
-  - `LocalChannel` calls a handler in-process (built-in transports, and WASM
-    hosts later).
+- **Carrier:** `StreamChannel` frames over any byte stream -- transports over
+  stdio, and `tock broker`.
 
 ## What's left
 

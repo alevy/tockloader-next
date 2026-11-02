@@ -4,8 +4,8 @@
 //! A message is a JSON control part plus an optional binary payload, so bulk
 //! flash data never goes through JSON. The message layer ([`Request`],
 //! [`Response`]) is separate from the carrier: [`StreamChannel`] frames
-//! messages over any byte stream (a child process's stdio today), and
-//! [`LocalChannel`] calls a handler in-process (built-in transports, WASM).
+//! messages over any byte stream, which today is always a transport child
+//! process's stdio.
 //!
 //! Frame: `u32 LE json_len | json | u32 LE payload_len | payload`.
 
@@ -25,7 +25,9 @@ pub const PROTOCOL_VERSION: u32 = 0;
 pub enum Capability {
     /// `read` arbitrary flash.
     MemoryRead,
-    /// `write` whole pages (the transport erases as needed).
+    /// `write` an arbitrary byte range. The transport is responsible for its
+    /// device's erase granularity: if erasing destroys more than was sent, it
+    /// is the transport's job to preserve the rest.
     MemoryWrite,
     /// `hash` a range without transferring it.
     MemoryHash,
@@ -42,7 +44,6 @@ pub enum Capability {
 pub struct FlashInfo {
     pub start: u64,
     pub size: u64,
-    pub page_size: u64,
 }
 
 /// Which configuration layer an option came from.
@@ -84,12 +85,24 @@ impl<'a> Options<'a> {
         Options { values, sources }
     }
 
+    /// The raw value, for option shapes the typed accessors do not cover --
+    /// a list, say. Prefer `get_str` / `get_bool` / `get_path`.
+    pub fn get(&self, key: &str) -> Option<&'a serde_json::Value> {
+        self.values.get(key)
+    }
+
     pub fn get_str(&self, key: &str) -> Option<&'a str> {
         self.values.get(key).and_then(|v| v.as_str())
     }
 
     pub fn get_bool(&self, key: &str) -> Option<bool> {
         self.values.get(key).and_then(|v| v.as_bool())
+    }
+
+    /// The directory a value for `key` was written in, for options whose
+    /// shape `get_path` cannot handle -- a list of paths, say.
+    pub fn base_dir(&self, key: &str) -> Option<PathBuf> {
+        self.sources.get(key).map(|s| PathBuf::from(&s.base))
     }
 
     /// A path option, resolved against the directory of the file it was
@@ -130,7 +143,7 @@ pub enum Request {
         address: u64,
         len: u64,
     },
-    /// Payload: page-aligned data, whole pages.
+    /// Payload: the bytes to write. Any address, any length.
     Write {
         address: u64,
     },
@@ -217,6 +230,16 @@ pub enum ProtoError {
     Unexpected(Box<Response>),
 }
 
+/// An I/O failure inside a transport is a device error. Having the conversion
+/// here means a transport can use `?` on ordinary `std::io` calls and return
+/// `Result<_, Response>` throughout, instead of each one inventing its own
+/// error plumbing.
+impl From<std::io::Error> for Response {
+    fn from(e: std::io::Error) -> Response {
+        Response::error(ErrorKind::Device, e.to_string())
+    }
+}
+
 /// Something that answers requests: a transport, or the broker.
 pub trait Handler {
     fn handle(&mut self, request: Request, payload: Vec<u8>) -> (Response, Vec<u8>);
@@ -251,19 +274,6 @@ pub trait Channel {
             }),
             ok => Ok(ok),
         }
-    }
-}
-
-/// In-process carrier.
-pub struct LocalChannel<H: Handler>(pub H);
-
-impl<H: Handler> Channel for LocalChannel<H> {
-    fn call(
-        &mut self,
-        request: &Request,
-        payload: &[u8],
-    ) -> Result<(Response, Vec<u8>), ProtoError> {
-        Ok(self.0.handle(request.clone(), payload.to_vec()))
     }
 }
 
@@ -342,6 +352,19 @@ impl Response {
             suggestion: None,
         }
     }
+
+    /// Attach the line the CLI prints as `try: ...`. A no-op on any response
+    /// that is not an error.
+    pub fn with_suggestion(self, hint: impl Into<String>) -> Response {
+        match self {
+            Response::Error { kind, message, .. } => Response::Error {
+                kind,
+                message,
+                suggestion: Some(hint.into()),
+            },
+            other => other,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -400,6 +423,31 @@ mod tests {
     }
 
     #[test]
+    fn base_dir_exposes_the_directory_a_value_was_written_in() {
+        let values = serde_json::json!({"config": ["a.cfg"], "chip": "X"});
+        let mut sources = BTreeMap::new();
+        sources.insert("config".to_string(), at("/repo"));
+        let o = Options::new(values.as_object().unwrap(), &sources);
+        // A list-valued option can resolve its own elements.
+        assert_eq!(o.base_dir("config"), Some(PathBuf::from("/repo")));
+        // No provenance recorded for this key.
+        assert_eq!(o.base_dir("chip"), None);
+    }
+
+    #[test]
+    fn io_errors_convert_into_device_responses() {
+        let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope");
+        let r: Response = e.into();
+        match r {
+            Response::Error { kind, message, .. } => {
+                assert_eq!(kind, ErrorKind::Device);
+                assert!(message.contains("nope"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn multi_word_wire_names_are_snake_case() {
         let s = serde_json::to_string(&Request::AppsList).unwrap();
         assert_eq!(s, r#"{"op":"apps_list"}"#);
@@ -416,7 +464,6 @@ mod tests {
             flash: FlashInfo {
                 start: 0,
                 size: 1024,
-                page_size: 512,
             },
             options: serde_json::Map::new(),
             option_sources: BTreeMap::new(),
@@ -452,7 +499,7 @@ mod tests {
     #[test]
     fn open_without_option_sources_still_parses() {
         let json = r#"{"op":"open","board":"b","arch":"cortex-m4",
-            "flash":{"start":0,"size":1024,"page_size":512},"options":{}}"#;
+            "flash":{"start":0,"size":1024},"options":{}}"#;
         let r: Request = serde_json::from_str(json).unwrap();
         match r {
             Request::Open { option_sources, .. } => assert!(option_sources.is_empty()),

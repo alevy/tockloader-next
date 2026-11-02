@@ -8,7 +8,7 @@ crates/tbf         TBF headers and TABs (no I/O)
 crates/tock-image  pure planner: discover / plan / render (no I/O)
 crates/tock-board  board, project and user config, and resolution with provenance (no I/O)
 crates/tock-proto  draft device protocol and framing
-crates/tock-cli    the `tock` binary, built-in `file` transport, example plugin
+crates/tock-cli    the `tock` binary and the `tock-transport-file` transport
 ```
 
 ## Try it without hardware

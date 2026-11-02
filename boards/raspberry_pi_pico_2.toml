@@ -11,7 +11,7 @@ description = "Raspberry Pi Pico 2"
 arch = "cortex-m4"
 
 [layout]
-flash = { start = 0x1000_0000, size = "4M", page_size = "4K" }
+flash = { start = 0x1000_0000, size = "4M" }
 kernel = { start = 0x1000_0000, size = "256K" }
 apps = { start = 0x1004_0000, size = "256K" }
 app_ram = { start = 0x2000_0000, size = "520K" }
@@ -28,6 +28,8 @@ alignment = "size"
 default = "openocd"
 
 [connection.openocd]
+# The erase unit, which only this transport needs to know.
+page_size = 4096
 config = ["interface/cmsis-dap.cfg", "target/rp2350.cfg"]
 
 [connection.probe-rs]
