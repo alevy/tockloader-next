@@ -161,10 +161,16 @@ pub struct Lengths {
 }
 
 impl Lengths {
+    /// Bytes of header a [`Lengths`] is read from: `version`, `header_size`,
+    /// `total_size`. Spelled out rather than taken from `size_of`, which
+    /// describes this struct's layout in memory and not the format's on
+    /// flash -- the two agreeing here is a coincidence.
+    pub const SIZE: usize = 8;
+
     /// Returns `None` if `bytes` does not start with a plausible version 2
-    /// header (e.g. erased flash).
+    /// header (e.g. erased flash), including when there are too few of them.
     pub fn parse(bytes: &[u8]) -> Option<Lengths> {
-        if bytes.len() < 8 {
+        if bytes.len() < Lengths::SIZE {
             return None;
         }
         let version = u16::from_le_bytes([bytes[0], bytes[1]]);

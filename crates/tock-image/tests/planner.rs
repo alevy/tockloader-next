@@ -469,3 +469,44 @@ fn a_header_too_long_for_the_region_ends_the_list() {
     assert_eq!(found.apps().count(), 0);
     assert_eq!(found.end(&region), region.start);
 }
+
+#[test]
+fn trailing_slack_too_small_for_a_header_ends_the_list() {
+    // A region whose tail is four bytes: not enough to read even the length
+    // prefix of a header. The walk must stop cleanly rather than reading
+    // short and parsing garbage.
+    let tbf = tbf::testing::app("a", 2048, 1024, None);
+    let region = Region {
+        start: 0x40000,
+        size: 2048 + 4,
+    };
+    let mut image = vec![0xFFu8; region.size as usize];
+    let bytes = tbf.content_bytes();
+    image[..bytes.len()].copy_from_slice(&bytes);
+
+    let flash = Flash::from_image(&region, region.start, &image);
+    let found = discover(&region, &flash).expect("stops cleanly on a short tail");
+    assert_eq!(found.apps().count(), 1);
+    assert_eq!(found.end(&region), region.start + 2048);
+}
+
+#[test]
+fn an_app_list_that_exactly_fills_the_region_terminates() {
+    // The lora-e5-mini case: the canonical app fills flash, so the walk ends
+    // with the cursor exactly on region.end(). Upstream tockloader reads past
+    // that point and the probe errors; stopping here is the whole reason the
+    // board file states where flash ends.
+    let tbf = tbf::testing::app("a", 4096, 2048, None);
+    let region = Region {
+        start: 0x40000,
+        size: 4096,
+    };
+    let mut image = vec![0xFFu8; region.size as usize];
+    let bytes = tbf.content_bytes();
+    image[..bytes.len()].copy_from_slice(&bytes);
+
+    let flash = Flash::from_image(&region, region.start, &image);
+    let found = discover(&region, &flash).expect("terminates with no room left");
+    assert_eq!(found.apps().count(), 1);
+    assert_eq!(found.end(&region), region.end());
+}

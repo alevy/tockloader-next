@@ -36,9 +36,10 @@ pub fn render(region: &Region, plan: &Plan, flash: &Flash) -> Result<Vec<WriteRu
             } => runs.push((*address, Header::padding(*size as u32).to_bytes())),
         }
     }
-    if plan.end + 8 <= region.end() {
-        // Anything that is not a version 2 header ends the list.
-        runs.push((plan.end, vec![0xFF; 8]));
+    if plan.end + tbf::Lengths::SIZE as u64 <= region.end() {
+        // Erased bytes where the next length prefix would be: anything that is
+        // not a version 2 header ends the list.
+        runs.push((plan.end, vec![0xFF; tbf::Lengths::SIZE]));
     }
 
     // Keep only the bytes that differ from what is there now. Asking for the

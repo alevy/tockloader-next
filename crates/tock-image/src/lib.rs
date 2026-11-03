@@ -145,13 +145,17 @@ const HEADER_PROBE: u64 = 256;
 
 /// Read the header at `address`, or `None` if there is not one there.
 ///
-/// Reads [`HEADER_PROBE`] bytes speculatively: the lengths come from the
-/// first eight, and the header almost always lies inside the rest.
+/// Reads [`HEADER_PROBE`] bytes speculatively: the length prefix comes from
+/// the start of them and the header almost always lies inside the rest, so
+/// one read covers both.
 fn read_header(region: &Region, flash: &Flash, address: u64) -> Result<Option<Header>, NeedRead> {
-    let available = region.end() - address;
+    let available = region.end().saturating_sub(address);
     let probe = HEADER_PROBE.min(available);
     let head = flash.read(address, probe)?;
-    let Some(lengths) = Lengths::parse(&head[..8]) else {
+    // Unsliced: `Lengths::parse` returns `None` when there are too few bytes,
+    // so this is safe on a region whose tail is shorter than a length prefix,
+    // rather than relying on the caller having checked.
+    let Some(lengths) = Lengths::parse(&head) else {
         return Ok(None);
     };
     let header_size = lengths.header_size as u64;
@@ -173,13 +177,11 @@ fn read_header(region: &Region, flash: &Flash, address: u64) -> Result<Option<He
 pub fn discover(region: &Region, flash: &Flash) -> Result<Discovered, NeedRead> {
     let mut entries = Vec::new();
     let mut address = region.start;
-    // Stop at the end of the region rather than reading past it: the board
-    // file is what says where that is. An app list that fills the region
-    // exactly is the case upstream tockloader cannot express.
-    while address + 8 <= region.end() {
-        let Some(header) = read_header(region, flash, address)? else {
-            break;
-        };
+    // `read_header` is what stops this at the end of the region -- it reads
+    // nothing once the cursor reaches it, and nothing parses as a header. The
+    // board file is what says where that end is, which is the case upstream
+    // tockloader cannot express.
+    while let Some(header) = read_header(region, flash, address)? {
         let total = header.total_size as u64;
         // A header claiming to run past the region ends the list, as it would
         // for the kernel.
