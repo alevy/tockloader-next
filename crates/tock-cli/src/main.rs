@@ -466,8 +466,9 @@ fn change_apps(
     let (mut flash, found) = discover(ctx, &mut device)?;
     let plan = tock_image::plan(&region, placement, ctx.board.app_ram(), &found, &request)
         .map_err(plan_error)?;
+    let write_gap = device.write_gap();
     let writes = with_reads(&mut device, &mut flash, |f| {
-        tock_image::render(&region, &plan, f)
+        tock_image::render(&region, &plan, f, write_gap)
     })?;
 
     if !change.dry_run {

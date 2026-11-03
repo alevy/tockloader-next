@@ -1,7 +1,7 @@
 use serde::Serialize;
 use tbf::Header;
 
-use crate::{COALESCE_GAP, Flash, NeedRead, Plan, Region, Slot, coalesce};
+use crate::{Flash, NeedRead, Plan, Region, Slot, coalesce};
 
 /// A run of bytes to write. Not a page: erase geometry belongs to the
 /// transport, which is the only thing that knows it.
@@ -17,7 +17,15 @@ pub struct WriteRun {
 /// Only bytes the plan defines are considered, and a run whose bytes already
 /// match the device is dropped -- which is why this needs to know the current
 /// contents, and asks for them when it does not.
-pub fn render(region: &Region, plan: &Plan, flash: &Flash) -> Result<Vec<WriteRun>, NeedRead> {
+/// `write_gap` is how far apart two changed runs may be before writing them
+/// separately beats bridging the bytes between them. It is the caller's to
+/// decide: only the caller knows what is on the other end.
+pub fn render(
+    region: &Region,
+    plan: &Plan,
+    flash: &Flash,
+    write_gap: u64,
+) -> Result<Vec<WriteRun>, NeedRead> {
     // Byte runs to write, all computed from the current (pre-write) contents.
     let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
     let mut need = Vec::new();
@@ -69,9 +77,10 @@ pub fn render(region: &Region, plan: &Plan, flash: &Flash) -> Result<Vec<WriteRu
     }
 
     if !need.is_empty() {
-        return Err(NeedRead {
-            ranges: coalesce(&need, COALESCE_GAP),
-        });
+        // Returned as they are: merging read requests is the caller's job,
+        // and it does it on the way out. Doing it here as well was doing it
+        // twice, with a number chosen for writes.
+        return Err(NeedRead { ranges: need });
     }
 
     // One write per contiguous changed region: a transport that erases before
@@ -81,7 +90,7 @@ pub fn render(region: &Region, plan: &Plan, flash: &Flash) -> Result<Vec<WriteRu
             .iter()
             .map(|(a, d)| (*a, d.len() as u64))
             .collect::<Vec<_>>(),
-        COALESCE_GAP,
+        write_gap,
     );
     let mut writes = Vec::with_capacity(spans.len());
     for (address, len) in spans {

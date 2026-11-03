@@ -7,10 +7,31 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use tock_board::Context;
-use tock_image::{COALESCE_GAP, WriteRun, coalesce};
+use tock_image::{WriteRun, coalesce};
 use tock_proto::{Capability, Channel, FlashInfo, ProtoError, Request, Response, StreamChannel};
 
 use crate::error::{CliError, Code};
+
+/// How far apart two reads may be before issuing them separately beats reading
+/// the bytes between them. Round-trip cost against per-byte cost: for a file
+/// both are near nothing; for openocd a read is a `dump_image` and a temp
+/// file. One value for every transport is a placeholder -- when a second
+/// transport makes the difference bite, this wants to be a connection option
+/// rather than a constant, since the link matters more than the tool (openocd
+/// over a local probe and over a remote one are not alike).
+const READ_GAP: u64 = 256;
+
+/// How far apart two changed runs may be before writing them separately beats
+/// bridging the bytes between them.
+///
+/// For a transport that erases before writing, the answer is exactly one byte
+/// less than its erase block. Two runs in the same or adjacent blocks cost the
+/// same erases either way, so merging them is free; a gap of a whole block or
+/// more would erase a block nothing needed to touch. So this wants to come
+/// from the transport -- `Hello` is the obvious place -- and until one
+/// declares it, this placeholder assumes the 4 KiB blocks both bundled boards
+/// have.
+const WRITE_GAP: u64 = 4095;
 
 pub struct Device {
     channel: Box<dyn Channel>,
@@ -201,7 +222,7 @@ impl Device {
     /// bytes for each range as issued, which may be wider than asked for.
     pub fn read_ranges(&mut self, ranges: &[(u64, u64)]) -> Result<Vec<(u64, Vec<u8>)>, CliError> {
         let mut out = Vec::new();
-        for (address, len) in coalesce(ranges, COALESCE_GAP) {
+        for (address, len) in coalesce(ranges, READ_GAP) {
             let (_, data) = self
                 .channel
                 .call_ok(&Request::Read { address, len }, &[])
@@ -237,6 +258,12 @@ impl Device {
                 .map_err(proto)?;
         }
         Ok(())
+    }
+
+    /// How far apart changed runs may be merged for this connection. Passed
+    /// to `render`, which has the bytes needed to bridge a gap.
+    pub fn write_gap(&self) -> u64 {
+        WRITE_GAP
     }
 
     /// Forward a raw request (used by `tock broker`).

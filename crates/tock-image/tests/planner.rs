@@ -27,6 +27,12 @@ fn new_app(name: &str, size: u32) -> NewApp {
     }
 }
 
+/// Merging distance these scenarios render with. Chosen to match what the CLI
+/// currently ships for a 4 KiB erase block, so the tests exercise the same
+/// merging the tool does rather than a convenient zero -- but it is this
+/// file's own choice of scenario, not a value to keep in step with the CLI's.
+const WRITE_GAP: u64 = 4095;
+
 /// A board: flash image covering the app region, initially erased.
 struct Board {
     region: Region,
@@ -52,7 +58,7 @@ impl Board {
         let flash = self.flash();
         let found = discover(&self.region, &flash).unwrap();
         let plan = plan(&self.region, &self.placement, None, &found, &req)?;
-        let writes = render(&self.region, &plan, &flash).unwrap();
+        let writes = render(&self.region, &plan, &flash, WRITE_GAP).unwrap();
         for w in &writes {
             let off = (w.address - self.region.start) as usize;
             self.image[off..off + w.data.len()].copy_from_slice(&w.data);

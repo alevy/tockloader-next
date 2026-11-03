@@ -23,10 +23,6 @@ pub use flash::{Flash, NeedRead};
 pub use planner::{Action, NewApp, Plan, PlanError, Request, Slot, plan};
 pub use ranges::coalesce;
 
-/// Changed runs closer together than this are merged into one write. Sending
-/// a few extra bytes is far cheaper than a second erase cycle on a transport
-/// that erases before writing.
-pub const COALESCE_GAP: u64 = 256;
 pub use render::{WriteRun, render};
 
 use serde::{Deserialize, Serialize};
