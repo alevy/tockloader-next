@@ -1,13 +1,42 @@
-//! Draft device protocol, spoken between the core, subcommands and
-//! transports.
+//! The protocol `tock` speaks to a transport.
 //!
-//! A message is a JSON control part plus an optional binary payload, so bulk
-//! flash data never goes through JSON. The message layer ([`Request`],
-//! [`Response`]) is separate from the carrier: [`StreamChannel`] frames
-//! messages over any byte stream, which today is always a transport child
-//! process's stdio.
+//! # Who talks
 //!
-//! Frame: `u32 LE json_len | json | u32 LE payload_len | payload`.
+//! Two roles, and every participant is one or the other.
+//!
+//! A **responder** implements [`Handler`]: it receives a [`Request`] and
+//! answers with a [`Response`]. Transports are responders, and so is
+//! `tock broker`. This is the extension point -- writing a transport means
+//! implementing this trait and nothing else.
+//!
+//! A **caller** holds a [`Channel`] and sends requests over it. `tock` is a
+//! caller when it drives a transport; an external `tock-<name>` subcommand is
+//! a caller when it drives `tock broker`. Note that the broker is both at
+//! once: it answers its own client while calling the transport beneath it,
+//! which is how a third-party subcommand reaches a device it never opened.
+//!
+//! # What they say, and in what order
+//!
+//! 1. [`Request::Hello`] -- version and capability check, before anything
+//!    else. A responder that disagrees about [`PROTOCOL_VERSION`] says so
+//!    here.
+//! 2. [`Request::Open`] -- the resolved board, flash geometry and transport
+//!    options. Nothing may touch the device before this.
+//! 3. Operations -- [`Request::Read`], [`Request::Write`] and the rest, in
+//!    any order, as many times as the caller likes. A responder may refuse
+//!    any it did not advertise in its [`Capability`] list.
+//! 4. [`Request::Close`] -- the responder releases the device and stops.
+//!
+//! # How it travels
+//!
+//! The message layer above is independent of the carrier. [`StreamChannel`]
+//! and [`serve`] are the two ends of the one carrier that exists today: a
+//! framed byte stream, which in practice is a transport child process's
+//! stdio. See [`StreamChannel`] for the frame layout.
+//!
+//! Control fields are JSON; bulk flash contents are not, and travel beside
+//! the JSON as opaque bytes. That split is the point -- a megabyte of flash
+//! would be unreadable and enormous base64-encoded into a message.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -18,75 +47,8 @@ use serde::{Deserialize, Serialize};
 /// Bumped on any incompatible change. 0 = draft, no stability promised.
 pub const PROTOCOL_VERSION: u32 = 0;
 
-/// What a transport can do. Commands check these up front and fail with a
-/// clear error if a capability is missing.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Capability {
-    /// `read` arbitrary flash.
-    MemoryRead,
-    /// `write` an arbitrary byte range. The transport is responsible for its
-    /// device's erase granularity: if erasing destroys more than was sent, it
-    /// is the transport's job to preserve the rest.
-    MemoryWrite,
-    /// `hash` a range without transferring it.
-    MemoryHash,
-    /// App-level `apps_list` / `apps_install` / `apps_remove`, e.g. dynamic
-    /// loading into a running kernel.
-    Apps,
-    Reset,
-    Console,
-    /// Namespaced vendor operations, passed through untouched.
-    Vendor(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FlashInfo {
-    pub start: u64,
-    pub size: u64,
-}
-
-/// Resolved options, as a transport sees them, each with the directory its
-/// value was written in so a relative path can be made sense of.
-pub struct Options<'a> {
-    values: &'a serde_json::Map<String, serde_json::Value>,
-    bases: &'a BTreeMap<String, String>,
-}
-
-impl<'a> Options<'a> {
-    pub fn new(
-        values: &'a serde_json::Map<String, serde_json::Value>,
-        bases: &'a BTreeMap<String, String>,
-    ) -> Options<'a> {
-        Options { values, bases }
-    }
-
-    /// The raw value, for option shapes the typed accessors do not cover --
-    /// a list, say. Prefer `get_str` / `get_bool` / `get_path`.
-    pub fn get(&self, key: &str) -> Option<&'a serde_json::Value> {
-        self.values.get(key)
-    }
-
-    /// The directory a value for `key` was written in, for options whose
-    /// shape `get_path` cannot handle -- a list of paths, say.
-    pub fn base_dir(&self, key: &str) -> Option<PathBuf> {
-        self.bases.get(key).map(PathBuf::from)
-    }
-
-    /// A path option, resolved against the directory of the file it was
-    /// written in. Absolute values, and values with no provenance, are used
-    /// exactly as written.
-    pub fn get_path(&self, key: &str) -> Option<PathBuf> {
-        let value = PathBuf::from(self.get(key)?.as_str()?);
-        if value.is_absolute() {
-            return Some(value);
-        }
-        match self.base_dir(key) {
-            Some(base) => Some(base.join(value)),
-            None => Some(value),
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Messages
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -165,6 +127,57 @@ pub enum Response {
     },
 }
 
+impl Response {
+    pub fn error(kind: ErrorKind, message: impl Into<String>) -> Response {
+        Response::Error {
+            kind,
+            message: message.into(),
+            suggestion: None,
+        }
+    }
+
+    /// Attach the line the CLI prints as `try: ...`. A no-op on any response
+    /// that is not an error.
+    pub fn with_suggestion(self, hint: impl Into<String>) -> Response {
+        match self {
+            Response::Error { kind, message, .. } => Response::Error {
+                kind,
+                message,
+                suggestion: Some(hint.into()),
+            },
+            other => other,
+        }
+    }
+}
+
+/// What a transport can do. Commands check these up front and fail with a
+/// clear error if a capability is missing.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
+    /// `read` arbitrary flash.
+    MemoryRead,
+    /// `write` an arbitrary byte range. The transport is responsible for its
+    /// device's erase granularity: if erasing destroys more than was sent, it
+    /// is the transport's job to preserve the rest.
+    MemoryWrite,
+    /// `hash` a range without transferring it.
+    MemoryHash,
+    /// App-level `apps_list` / `apps_install` / `apps_remove`, e.g. dynamic
+    /// loading into a running kernel.
+    Apps,
+    Reset,
+    Console,
+    /// Namespaced vendor operations, passed through untouched.
+    Vendor(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlashInfo {
+    pub start: u64,
+    pub size: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
@@ -182,40 +195,24 @@ pub struct AppInfo {
     pub size: u64,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ProtoError {
-    #[error("i/o: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("bad message: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("peer closed the connection")]
-    Closed,
-    #[error("{message}")]
-    Remote {
-        kind: ErrorKind,
-        message: String,
-        suggestion: Option<String>,
-    },
-    #[error("unexpected response: {0:?}")]
-    Unexpected(Box<Response>),
-}
+// ---------------------------------------------------------------------------
+// The two roles
 
-/// An I/O failure inside a transport is a device error. Having the conversion
-/// here means a transport can use `?` on ordinary `std::io` calls and return
-/// `Result<_, Response>` throughout, instead of each one inventing its own
-/// error plumbing.
-impl From<std::io::Error> for Response {
-    fn from(e: std::io::Error) -> Response {
-        Response::error(ErrorKind::Device, e.to_string())
-    }
-}
-
-/// Something that answers requests: a transport, or the broker.
+/// Answers requests: every transport, and `tock broker`.
+///
+/// This is the extension point. A new transport implements this and nothing
+/// else -- `serve` supplies the loop, the framing and the lifecycle.
 pub trait Handler {
     fn handle(&mut self, request: Request, payload: Vec<u8>) -> (Response, Vec<u8>);
 }
 
-/// The client side of a connection, independent of the carrier.
+/// Sends requests and waits for their answers.
+///
+/// Unlike [`Handler`] this is not an extension point -- it is a seam. One
+/// implementation does the real work ([`StreamChannel`]); the trait exists so
+/// `tock` can substitute others: a decorator that logs every message for
+/// `--trace-protocol`, a stub in tests, and eventually an in-process carrier
+/// for a host that embeds a transport rather than spawning one.
 pub trait Channel {
     fn call(
         &mut self,
@@ -247,7 +244,38 @@ pub trait Channel {
     }
 }
 
-/// Framed carrier over a byte stream.
+#[derive(Debug, thiserror::Error)]
+pub enum ProtoError {
+    #[error("i/o: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("bad message: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("peer closed the connection")]
+    Closed,
+    #[error("{message}")]
+    Remote {
+        kind: ErrorKind,
+        message: String,
+        suggestion: Option<String>,
+    },
+    #[error("unexpected response: {0:?}")]
+    Unexpected(Box<Response>),
+}
+
+// ---------------------------------------------------------------------------
+// The carrier
+
+/// The caller's end of a framed byte stream. [`serve`] is the other end.
+///
+/// Each message is one frame, control part first:
+///
+/// ```text
+/// u32 LE json_len | json | u32 LE payload_len | payload
+/// ```
+///
+/// Both lengths are always present; either may be zero. The payload is the
+/// request's or response's bulk bytes -- flash contents, a TBF -- and is
+/// never JSON.
 pub struct StreamChannel<R: Read, W: Write> {
     pub reader: R,
     pub writer: W,
@@ -262,38 +290,6 @@ impl<R: Read, W: Write> Channel for StreamChannel<R, W> {
         write_frame(&mut self.writer, request, payload)?;
         read_frame(&mut self.reader)?.ok_or(ProtoError::Closed)
     }
-}
-
-pub fn write_frame<W: Write, T: Serialize>(
-    w: &mut W,
-    message: &T,
-    payload: &[u8],
-) -> Result<(), ProtoError> {
-    let json = serde_json::to_vec(message)?;
-    w.write_all(&(json.len() as u32).to_le_bytes())?;
-    w.write_all(&json)?;
-    w.write_all(&(payload.len() as u32).to_le_bytes())?;
-    w.write_all(payload)?;
-    w.flush()?;
-    Ok(())
-}
-
-/// `Ok(None)` on a clean end of stream.
-pub fn read_frame<R: Read, T: for<'de> Deserialize<'de>>(
-    r: &mut R,
-) -> Result<Option<(T, Vec<u8>)>, ProtoError> {
-    let mut len = [0u8; 4];
-    match r.read_exact(&mut len) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e.into()),
-    }
-    let mut json = vec![0u8; u32::from_le_bytes(len) as usize];
-    r.read_exact(&mut json)?;
-    r.read_exact(&mut len)?;
-    let mut payload = vec![0u8; u32::from_le_bytes(len) as usize];
-    r.read_exact(&mut payload)?;
-    Ok(Some((serde_json::from_slice(&json)?, payload)))
 }
 
 /// Serve requests from a stream until `Close` or end of stream. Used by
@@ -314,26 +310,95 @@ pub fn serve<R: Read, W: Write, H: Handler>(
     Ok(())
 }
 
-impl Response {
-    pub fn error(kind: ErrorKind, message: impl Into<String>) -> Response {
-        Response::Error {
-            kind,
-            message: message.into(),
-            suggestion: None,
-        }
+/// One frame out. See [`StreamChannel`] for the layout.
+fn write_frame<W: Write, T: Serialize>(
+    w: &mut W,
+    message: &T,
+    payload: &[u8],
+) -> Result<(), ProtoError> {
+    let json = serde_json::to_vec(message)?;
+    w.write_all(&(json.len() as u32).to_le_bytes())?;
+    w.write_all(&json)?;
+    w.write_all(&(payload.len() as u32).to_le_bytes())?;
+    w.write_all(payload)?;
+    w.flush()?;
+    Ok(())
+}
+
+/// One frame in, or `Ok(None)` at a clean end of stream. See
+/// [`StreamChannel`] for the layout.
+fn read_frame<R: Read, T: for<'de> Deserialize<'de>>(
+    r: &mut R,
+) -> Result<Option<(T, Vec<u8>)>, ProtoError> {
+    let mut len = [0u8; 4];
+    match r.read_exact(&mut len) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
+    let mut json = vec![0u8; u32::from_le_bytes(len) as usize];
+    r.read_exact(&mut json)?;
+    r.read_exact(&mut len)?;
+    let mut payload = vec![0u8; u32::from_le_bytes(len) as usize];
+    r.read_exact(&mut payload)?;
+    Ok(Some((serde_json::from_slice(&json)?, payload)))
+}
+
+// ---------------------------------------------------------------------------
+// For responders
+
+/// The options from [`Request::Open`], as a responder reads them.
+///
+/// Not a wire type -- a borrowed view over what arrived, pairing each value
+/// with the directory it was written in so a relative path can be resolved
+/// against the file that declared it rather than the working directory.
+pub struct Options<'a> {
+    values: &'a serde_json::Map<String, serde_json::Value>,
+    bases: &'a BTreeMap<String, String>,
+}
+
+impl<'a> Options<'a> {
+    pub fn new(
+        values: &'a serde_json::Map<String, serde_json::Value>,
+        bases: &'a BTreeMap<String, String>,
+    ) -> Options<'a> {
+        Options { values, bases }
     }
 
-    /// Attach the line the CLI prints as `try: ...`. A no-op on any response
-    /// that is not an error.
-    pub fn with_suggestion(self, hint: impl Into<String>) -> Response {
-        match self {
-            Response::Error { kind, message, .. } => Response::Error {
-                kind,
-                message,
-                suggestion: Some(hint.into()),
-            },
-            other => other,
+    /// The raw value, for option shapes the typed accessors do not cover --
+    /// a list, say. Prefer `get_str` / `get_bool` / `get_path`.
+    pub fn get(&self, key: &str) -> Option<&'a serde_json::Value> {
+        self.values.get(key)
+    }
+
+    /// The directory a value for `key` was written in, for options whose
+    /// shape `get_path` cannot handle -- a list of paths, say.
+    pub fn base_dir(&self, key: &str) -> Option<PathBuf> {
+        self.bases.get(key).map(PathBuf::from)
+    }
+
+    /// A path option, resolved against the directory of the file it was
+    /// written in. Absolute values, and values with no provenance, are used
+    /// exactly as written.
+    pub fn get_path(&self, key: &str) -> Option<PathBuf> {
+        let value = PathBuf::from(self.get(key)?.as_str()?);
+        if value.is_absolute() {
+            return Some(value);
         }
+        match self.base_dir(key) {
+            Some(base) => Some(base.join(value)),
+            None => Some(value),
+        }
+    }
+}
+
+/// An I/O failure inside a transport is a device error. Having the conversion
+/// here means a transport can use `?` on ordinary `std::io` calls and return
+/// `Result<_, Response>` throughout, instead of each one inventing its own
+/// error plumbing.
+impl From<std::io::Error> for Response {
+    fn from(e: std::io::Error) -> Response {
+        Response::error(ErrorKind::Device, e.to_string())
     }
 }
 
