@@ -25,14 +25,20 @@ tock-proto                                how do bytes reach a device?
                    tock-cli
 ```
 
-Start with `change_apps` in `crates/tock-cli/src/main.rs`, plus the
-`with_reads` loop above it. That is the whole system in about forty lines --
-connect, discover, plan, render, write, verify -- and every crate appears in
-it exactly once. Then outwards:
+Start with `run` in `crates/tock-cli/src/main.rs`. Its six arms are the
+structure: three porcelain commands where **we drive a transport**, `broker`
+where that inverts and **we serve the protocol to someone else**, `external`
+where third-party subcommands enter, and `config show` for what was resolved
+and from where. Then take one porcelain path all the way down. Then outwards:
+
+> To revisit: `run` shows the shape but does not explain it -- `main.rs` has a
+> one-line module doc. Whether the entrée ends up being prose there, or the
+> file is split so the structure is visible from the layout, is open.
 
 | | Read | For |
 |---|---|---|
-| 1 | `tock-cli/src/main.rs` -- `change_apps`, `with_reads` | the spine |
+| 1 | `tock-cli/src/main.rs` -- `run` | the shape: six commands, two directions |
+| 1b | `tock-cli/src/main.rs` -- `change_apps`, `with_reads` | one porcelain path end to end: connect, discover, plan, render, write, verify |
 | 2 | `tock-image/src/lib.rs` | the discover / plan / render contract, and how the core asks for bytes it does not have |
 | 3 | `tock-proto/src/lib.rs` | the vocabulary: what you may ask a device to do |
 | 4 | `tock-cli/transports/file.rs` | the smallest complete transport, and what a new one copies |
