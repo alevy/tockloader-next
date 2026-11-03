@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{Region, coalesce};
+use crate::Region;
 
 /// What is known about the contents of flash. Ranges that have not been read
 /// are unknown, not erased. Nothing here models erase geometry: that belongs
@@ -112,7 +112,9 @@ impl Flash {
                 }
             }
         }
-        coalesce(&gaps, 0)
+        // No coalescing needed: a known run always separates two gaps, so
+        // they can never abut.
+        gaps
     }
 
     /// Apply writes, so the known state matches the device after writing.

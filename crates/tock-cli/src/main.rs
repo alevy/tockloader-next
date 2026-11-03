@@ -323,6 +323,7 @@ fn list(g: &Global) -> Result<(), CliError> {
         ));
     }
     let (_, found) = discover(&ctx, &mut device)?;
+    let region = ctx.board.app_region();
     let apps: Vec<_> = found
         .apps()
         .map(|(address, h)| {
@@ -341,7 +342,7 @@ fn list(g: &Global) -> Result<(), CliError> {
     if g.format == Format::Json {
         println!(
             "{}",
-            json!({ "board": ctx.board.board.name, "apps": apps, "end": found.end, "list_end": found.how })
+            json!({ "board": ctx.board.board.name, "apps": apps, "end": found.end(&region) })
         );
         return Ok(());
     }

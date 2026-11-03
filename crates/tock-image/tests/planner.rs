@@ -447,3 +447,25 @@ fn a_write_carries_its_bytes_and_not_the_pages_around_them() {
     let total: usize = writes.iter().map(|w| w.data.len()).sum();
     assert!(total > 1000 && total < 2048, "wrote {total} bytes");
 }
+
+#[test]
+fn a_header_too_long_for_the_region_ends_the_list() {
+    // A region smaller than a u16 header_size, so a corrupt header's claimed
+    // length reaches past the end of flash. Reading it would ask the device
+    // for bytes outside the region the board file describes.
+    let region = Region {
+        start: 0x40000,
+        size: 1024,
+    };
+    let mut image = vec![0xFFu8; region.size as usize];
+    // Version 2, header_size 0xFFFF, total_size 0xFFFF_FFFF: Lengths::parse
+    // accepts it, since total >= header >= base.
+    image[0..2].copy_from_slice(&2u16.to_le_bytes());
+    image[2..4].copy_from_slice(&0xFFFFu16.to_le_bytes());
+    image[4..8].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+
+    let flash = Flash::from_image(&region, region.start, &image);
+    let found = discover(&region, &flash).expect("ends the list, does not read past it");
+    assert_eq!(found.apps().count(), 0);
+    assert_eq!(found.end(&region), region.start);
+}

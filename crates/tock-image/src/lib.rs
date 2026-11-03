@@ -115,24 +115,10 @@ impl Entry {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ListEnd {
-    /// Ran into bytes that are not a header (normally erased flash).
-    Terminated,
-    /// The list fills the region exactly.
-    RegionFull,
-    /// A header claims to extend past the region. Everything from here on is
-    /// ignored, as the kernel would.
-    Overrun,
-}
-
+/// The apps and padding found in a region, in address order.
 #[derive(Clone, Debug)]
 pub struct Discovered {
     pub entries: Vec<Entry>,
-    /// First address after the list.
-    pub end: u64,
-    pub how: ListEnd,
 }
 
 impl Discovered {
@@ -142,51 +128,73 @@ impl Discovered {
             _ => None,
         })
     }
+
+    /// First address after the list. Not derivable from [`Self::apps`] alone,
+    /// since padding entries count towards it too.
+    pub fn end(&self, region: &Region) -> u64 {
+        self.entries
+            .last()
+            .map_or(region.start, |e| e.address() + e.size())
+    }
+}
+
+/// How much to read when probing for a header. A TBF header is well under
+/// this, so one read covers the lengths and the header together rather than
+/// paying for two round trips. A format fact, not a transport one.
+const HEADER_PROBE: u64 = 256;
+
+/// Read the header at `address`, or `None` if there is not one there.
+///
+/// Reads [`HEADER_PROBE`] bytes speculatively: the lengths come from the
+/// first eight, and the header almost always lies inside the rest.
+fn read_header(region: &Region, flash: &Flash, address: u64) -> Result<Option<Header>, NeedRead> {
+    let available = region.end() - address;
+    let probe = HEADER_PROBE.min(available);
+    let head = flash.read(address, probe)?;
+    let Some(lengths) = Lengths::parse(&head[..8]) else {
+        return Ok(None);
+    };
+    let header_size = lengths.header_size as u64;
+    // A header claiming to be longer than the region is not a header. Reading
+    // it would ask the device for bytes outside the region the board file
+    // describes, which is the thing this walk exists not to do.
+    if header_size > available {
+        return Ok(None);
+    }
+    let bytes = if header_size <= probe {
+        head[..header_size as usize].to_vec()
+    } else {
+        flash.read(address, header_size)?
+    };
+    Ok(Header::parse(&bytes).ok())
 }
 
 /// Walk the linked list of TBFs the way the kernel does.
 pub fn discover(region: &Region, flash: &Flash) -> Result<Discovered, NeedRead> {
     let mut entries = Vec::new();
     let mut address = region.start;
-    let how = loop {
-        if address == region.end() {
-            break ListEnd::RegionFull;
-        }
-        if address + 8 > region.end() {
-            break ListEnd::Terminated;
-        }
-        // Ask for the whole header in one go, not 8 bytes and then the rest:
-        // the two requests come from different calls, so nothing downstream
-        // can merge them, and each one is a device round trip. The extra
-        // bytes are nearly free; the round trip is not.
-        let probe = COALESCE_GAP.min(region.end() - address);
-        let head = flash.read(address, probe)?;
-        let Some(lengths) = Lengths::parse(&head[..8]) else {
-            break ListEnd::Terminated;
+    // Stop at the end of the region rather than reading past it: the board
+    // file is what says where that is. An app list that fills the region
+    // exactly is the case upstream tockloader cannot express.
+    while address + 8 <= region.end() {
+        let Some(header) = read_header(region, flash, address)? else {
+            break;
         };
-        let total = lengths.total_size as u64;
+        let total = header.total_size as u64;
+        // A header claiming to run past the region ends the list, as it would
+        // for the kernel.
         if address + total > region.end() {
-            break ListEnd::Overrun;
+            break;
         }
-        let header_size = lengths.header_size as u64;
-        let bytes = if header_size <= probe {
-            head[..header_size as usize].to_vec()
+        entries.push(if header.is_app() {
+            Entry::App { address, header }
         } else {
-            flash.read(address, header_size)?
-        };
-        match Header::parse(&bytes) {
-            Ok(header) if header.is_app() => entries.push(Entry::App { address, header }),
-            Ok(_) => entries.push(Entry::Padding {
+            Entry::Padding {
                 address,
                 size: total,
-            }),
-            Err(_) => break ListEnd::Terminated,
-        }
+            }
+        });
         address += total;
-    };
-    Ok(Discovered {
-        entries,
-        end: address,
-        how,
-    })
+    }
+    Ok(Discovered { entries })
 }
