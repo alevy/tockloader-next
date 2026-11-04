@@ -741,3 +741,60 @@ fn a_transport_that_cannot_start_still_says_how_to_fix_it() {
     assert!(err.contains("cannot start `/nonexistent/openocd`"), "{err}");
     assert!(err.contains("try: install openocd"), "{err}");
 }
+
+#[test]
+fn a_subcommand_is_handed_a_connection_on_fd_3() {
+    // Written in Python on purpose: a subcommand should need nothing of ours
+    // but the fd and the frame layout.
+    let d = Dir::new("fd_handoff");
+    d.erased("flash.bin");
+    std::fs::write(
+        d.path("Tock.toml"),
+        "board = \"nrf52840dk\"\ntransport = \"file\"\n\
+         [transports.file]\npath = \"flash.bin\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(d.path("bin")).unwrap();
+    std::fs::write(
+        d.path("bin/tock-fdtest"),
+        r#"#!/usr/bin/env python3
+import os, json, struct
+f = os.fdopen(3, 'r+b', buffering=0)
+def call(msg):
+    j = json.dumps(msg).encode()
+    f.write(struct.pack('<I', len(j)) + j + struct.pack('<I', 0))
+    resp = json.loads(f.read(struct.unpack('<I', f.read(4))[0]))
+    f.read(struct.unpack('<I', f.read(4))[0])
+    return resp
+hello = call({"op": "hello", "protocol": 0, "client": "fdtest"})
+print("transport:", hello["transport"])
+print("caps:", ",".join(sorted(hello["capabilities"])))
+data = call({"op": "read", "address": 262144, "len": 8})
+print("read:", data["result"])
+"#,
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(d.path("bin/tock-fdtest"))
+        .unwrap()
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(d.path("bin/tock-fdtest"), perms).unwrap();
+
+    let path_env = format!(
+        "{}:{}",
+        d.path("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["fdtest"])
+        .current_dir(&d.0)
+        .env("PATH", path_env)
+        .env("TOCK_CONFIG", d.path("no-user-config.toml"))
+        .env("TOCK_PROJECT", d.path("Tock.toml"))
+        .output()
+        .unwrap();
+    let stdout = ok(out);
+    assert!(stdout.contains("transport: file"), "{stdout}");
+    assert!(stdout.contains("memory_read"), "{stdout}");
+    assert!(stdout.contains("read: data"), "{stdout}");
+}

@@ -5,10 +5,14 @@
 //! needs to run `tock broker`, so it reaches the device the same way a
 //! built-in command does.
 
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 
 use tock_board::Resolved;
 
+use crate::broker::Broker;
 use crate::cli::Global;
 use crate::config::{load_context, project_apps};
 use crate::error::{CliError, Code};
@@ -56,21 +60,50 @@ pub(crate) fn external(g: &Global, args: Vec<String>) -> Result<(), CliError> {
             cmd.env("TOCK_CONTEXT_ERROR", e.message);
         }
     }
-    // Pass global flags through so the subcommand can run `tock broker`.
-    for (flag, v) in [
-        ("--board", &g.board),
-        ("--transport", &g.transport),
-        ("--device", &g.device),
+    // Forwarded for a subcommand that re-invokes `tock` for something other
+    // than a device -- `tock config show`, say. Reaching the device does not
+    // need them: that is what fd 3 is for.
+    for (name, v) in [
+        ("TOCK_BOARD", &g.board),
+        ("TOCK_TRANSPORT", &g.transport),
+        ("TOCK_DEVICE", &g.device),
     ] {
         if let Some(v) = v {
-            cmd.env(
-                format!("TOCK_{}", flag.trim_start_matches("--").to_uppercase()),
-                v,
-            );
+            cmd.env(name, v);
         }
     }
-    let status = cmd
-        .status()
+
+    // One end of this is ours to serve; the other becomes the child's fd 3.
+    let (ours, theirs) = UnixStream::pair()
+        .map_err(|e| CliError::new(Code::Failed, format!("cannot make a connection: {e}")))?;
+    let theirs_fd = theirs.as_raw_fd();
+    cmd.env("TOCK_CONNECTION", "3");
+    // dup2 clears CLOEXEC on the new descriptor, so fd 3 survives the exec.
+    unsafe {
+        cmd.pre_exec(move || match libc::dup2(theirs_fd, 3) {
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        });
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| CliError::new(Code::Failed, format!("{exe}: {e}")))?;
+    // Our copy of the child's end must go, or we never see end of stream.
+    drop(theirs);
+
+    // Answer the child until it stops asking. Nothing is opened unless it
+    // asks for something that needs a device.
+    if let Ok(context) = load_context(g) {
+        let reader = ours
+            .try_clone()
+            .map_err(|e| CliError::new(Code::Failed, format!("{exe}: {e}")))?;
+        let mut broker = Broker::new(context, g.trace_protocol);
+        let _ = tock_proto::serve(reader, ours, &mut broker);
+    }
+
+    let status = child
+        .wait()
         .map_err(|e| CliError::new(Code::Failed, format!("{exe}: {e}")))?;
     std::process::exit(status.code().unwrap_or(1));
 }

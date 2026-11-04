@@ -1,50 +1,88 @@
 //! Serving the protocol instead of speaking it.
 //!
-//! `tock broker` resolves the context, opens the transport, and then answers
-//! requests on stdio -- so a subcommand that is a separate process reaches the
-//! same device, resolved the same way, without opening anything itself.
+//! The same broker answers two carriers. `tock broker` serves it on stdio,
+//! for a subcommand nobody launched. [`external`](crate::external) serves it
+//! on a socket the subcommand inherits as fd 3, which is the usual case and
+//! the one where `tock` genuinely owns the connection the PRD says it does.
+//!
+//! The transport is opened on the first request that needs it, so a
+//! subcommand that never touches a device -- building a TAB, say -- does not
+//! spawn one, and does not fail on a machine with no board attached.
+
+use tock_proto::{Connection, ProtoError, Request, Response};
 
 use crate::cli::Global;
 use crate::config::load_context;
 use crate::device::{self, Device};
 use crate::error::CliError;
 
-/// Answer Hello and Open ourselves (the broker has already opened the
-/// transport with the resolved context) and forward everything else.
-pub(crate) fn broker(g: &Global) -> Result<(), CliError> {
-    let ctx = load_context(g)?;
-    struct Broker {
-        device: Device,
-    }
+pub(crate) struct Broker {
+    context: tock_board::Context,
+    trace: bool,
+    device: Option<Device>,
+}
 
-    impl tock_proto::Connection for Broker {
-        fn call(
-            &mut self,
-            request: tock_proto::Request,
-            payload: Vec<u8>,
-        ) -> Result<(tock_proto::Response, Vec<u8>), tock_proto::ProtoError> {
-            use tock_proto::{Request as Rq, Response as Rs};
-            match request {
-                // Answered here: the transport was already opened with the
-                // resolved context before this client connected.
-                Rq::Hello { .. } => Ok((
-                    Rs::Hello {
-                        protocol: tock_proto::PROTOCOL_VERSION,
-                        transport: self.device.transport.clone(),
-                        version: env!("CARGO_PKG_VERSION").into(),
-                        capabilities: self.device.capabilities.clone(),
-                    },
-                    vec![],
-                )),
-                Rq::Open { .. } | Rq::Close => Ok((Rs::Ok, vec![])),
-                other => self.device.forward(other, payload),
-            }
+impl Broker {
+    pub(crate) fn new(context: tock_board::Context, trace: bool) -> Broker {
+        Broker {
+            context,
+            trace,
+            device: None,
         }
     }
 
-    let mut broker = Broker {
-        device: Device::connect(&ctx, g.trace_protocol)?,
-    };
+    /// Open on demand. A failure to open is fatal to the connection -- there
+    /// will never be a device -- so it travels as an error rather than a
+    /// response, carrying whatever the CLI would have told the user.
+    fn device(&mut self) -> Result<&mut Device, ProtoError> {
+        if self.device.is_none() {
+            let opened = Device::connect(&self.context, self.trace).map_err(fatal)?;
+            self.device = Some(opened);
+        }
+        Ok(self.device.as_mut().expect("just opened"))
+    }
+}
+
+fn fatal(e: CliError) -> ProtoError {
+    let error = ProtoError::failed(e.message);
+    if e.hints.is_empty() {
+        error
+    } else {
+        error.with_suggestion(e.hints.join("\n"))
+    }
+}
+
+impl Connection for Broker {
+    fn call(
+        &mut self,
+        request: Request,
+        payload: Vec<u8>,
+    ) -> Result<(Response, Vec<u8>), ProtoError> {
+        match request {
+            // Answered here: the client did not open this transport and does
+            // not get to say when it closes.
+            Request::Hello { .. } => {
+                let device = self.device()?;
+                Ok((
+                    Response::Hello {
+                        protocol: tock_proto::PROTOCOL_VERSION,
+                        transport: device.transport.clone(),
+                        version: env!("CARGO_PKG_VERSION").into(),
+                        capabilities: device.capabilities.clone(),
+                    },
+                    vec![],
+                ))
+            }
+            Request::Open { .. } | Request::Close => Ok((Response::Ok, vec![])),
+            other => self.device()?.forward(other, payload),
+        }
+    }
+}
+
+/// `tock broker`: serve on stdio, for a subcommand that was not launched by
+/// `tock` and so has no inherited connection.
+pub(crate) fn broker(g: &Global) -> Result<(), CliError> {
+    let mut broker = Broker::new(load_context(g)?, g.trace_protocol);
     tock_proto::serve(
         std::io::stdin().lock(),
         std::io::stdout().lock(),

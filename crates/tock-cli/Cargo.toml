@@ -29,3 +29,4 @@ toml.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tempfile.workspace = true
+libc.workspace = true
