@@ -15,35 +15,8 @@ pub(crate) fn broker(g: &Global) -> Result<(), CliError> {
     let ctx = load_context(g)?;
     struct Broker {
         device: Device,
-        board: String,
-        flash: tock_proto::FlashInfo,
     }
-    impl Broker {
-        /// External subcommands reach the device through here, so this is
-        /// where their requests are checked. Transports check their own
-        /// bounds too -- they are separately spawnable -- but only the broker
-        /// knows which board it is, so only the broker can say which one the
-        /// address is outside of.
-        fn check(&self, request: &tock_proto::Request, payload: &[u8]) -> Option<String> {
-            let (address, len) = match *request {
-                tock_proto::Request::Read { address, len } => (address, len),
-                tock_proto::Request::Write { address } => (address, payload.len() as u64),
-                _ => return None,
-            };
-            let (start, size) = (self.flash.start, self.flash.size);
-            let board = &self.board;
-            if address < start || address + len > start + size {
-                return Some(format!(
-                    "{address:#x}+{len} is outside flash on {board} ({start:#x} +{size:#x})"
-                ));
-            }
-            None
-        }
-    }
-    /// The broker is both roles at once: it answers its own client while
-    /// calling the transport beneath it, which is how a third-party
-    /// subcommand reaches a device it never opened. With one trait that is
-    /// just delegation.
+
     impl tock_proto::Connection for Broker {
         fn call(
             &mut self,
@@ -51,12 +24,6 @@ pub(crate) fn broker(g: &Global) -> Result<(), CliError> {
             payload: Vec<u8>,
         ) -> Result<(tock_proto::Response, Vec<u8>), tock_proto::ProtoError> {
             use tock_proto::{Request as Rq, Response as Rs};
-            if let Some(problem) = self.check(&request, &payload) {
-                return Ok((
-                    Rs::error(tock_proto::ErrorKind::InvalidRequest, problem),
-                    vec![],
-                ));
-            }
             match request {
                 // Answered here: the transport was already opened with the
                 // resolved context before this client connected.
@@ -75,13 +42,7 @@ pub(crate) fn broker(g: &Global) -> Result<(), CliError> {
         }
     }
 
-    let layout = &ctx.board.layout;
     let mut broker = Broker {
-        board: ctx.board.board.name.clone(),
-        flash: tock_proto::FlashInfo {
-            start: layout.flash.start.0,
-            size: layout.flash.size.0,
-        },
         device: Device::connect(&ctx, g.trace_protocol)?,
     };
     tock_proto::serve(

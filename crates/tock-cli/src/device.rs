@@ -8,7 +8,9 @@ use std::process::{Child, Command, Stdio};
 
 use tock_board::Context;
 use tock_image::{WriteRun, coalesce};
-use tock_proto::{Capability, Connection, FlashInfo, ProtoError, Request, Response, StreamChannel};
+use tock_proto::{
+    Capability, Connection, ErrorKind, FlashInfo, ProtoError, Request, Response, StreamChannel,
+};
 
 use crate::error::{CliError, Code};
 
@@ -107,6 +109,47 @@ impl Connection for Traced {
     }
 }
 
+/// A [`Connection`] that refuses reads and writes outside the board's flash,
+/// and forwards everything else.
+///
+/// A decorator rather than something the broker does, so every path to a
+/// device has it: the built-in commands, and a third-party subcommand coming
+/// through `tock broker`. Only this layer knows which board it is, which is
+/// why it can say which one the address is outside of.
+struct Bounded {
+    inner: Box<dyn Connection>,
+    board: String,
+    flash: FlashInfo,
+}
+
+impl Bounded {
+    fn problem(&self, request: &Request, payload: &[u8]) -> Option<String> {
+        let (address, len) = match *request {
+            Request::Read { address, len } => (address, len),
+            Request::Write { address } => (address, payload.len() as u64),
+            _ => return None,
+        };
+        let (start, size) = (self.flash.start, self.flash.size);
+        let board = &self.board;
+        (address < start || address + len > start + size).then(|| {
+            format!("{address:#x}+{len} is outside flash on {board} ({start:#x} +{size:#x})")
+        })
+    }
+}
+
+impl Connection for Bounded {
+    fn call(
+        &mut self,
+        request: Request,
+        payload: Vec<u8>,
+    ) -> Result<(Response, Vec<u8>), ProtoError> {
+        match self.problem(&request, &payload) {
+            Some(problem) => Ok((Response::error(ErrorKind::InvalidRequest, problem), vec![])),
+            None => self.inner.call(request, payload),
+        }
+    }
+}
+
 /// Open the transport named in the context. Every transport is an executable
 /// `tock-transport-<name>`, found next to `tock` or on `PATH` -- including the
 /// `file` transport, which ships alongside `tock` but is not special.
@@ -185,6 +228,13 @@ impl Device {
             start: layout.flash.start.0,
             size: layout.flash.size.0,
         };
+        // Every request from here on is checked against the board's flash,
+        // whoever sent it.
+        let mut connection: Box<dyn Connection> = Box::new(Bounded {
+            inner: connection,
+            board: ctx.board.board.name.clone(),
+            flash: flash.clone(),
+        });
         let options = serde_json::to_value(ctx.transport_options()).unwrap();
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let open = Request::Open {
