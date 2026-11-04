@@ -12,7 +12,7 @@ use tock_image::{Discovered, Flash, NeedRead, NewApp, Request};
 use tock_proto::Capability;
 
 use crate::cli::{ChangeArgs, Format, Global};
-use crate::config::{load_context, load_project};
+use crate::config::{load_context, project_apps};
 use crate::device::Device;
 use crate::error::{CliError, Code};
 
@@ -120,20 +120,15 @@ pub(crate) fn install(
 ) -> Result<(), CliError> {
     let ctx = load_context(g)?;
     if tabs.is_empty() {
-        let project = load_project()?;
-        let Some((origin, p)) = project.filter(|(_, p)| !p.apps.is_empty()) else {
+        tabs = project_apps()?;
+        if tabs.is_empty() {
             return Err(CliError::new(
                 Code::Failed,
                 "no TABs given and no [[app]] entries in a Tock.toml",
             )
             .hint("tock install path/to/app.tab")
             .hint("or list apps in Tock.toml: [[app]] tab = \"build/app.tab\""));
-        };
-        let dir = Path::new(&origin)
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
-        tabs = p.apps.iter().map(|a| dir.join(&a.tab)).collect();
+        }
     }
     let mut apps = Vec::new();
     for path in &tabs {

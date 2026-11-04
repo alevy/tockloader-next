@@ -12,7 +12,7 @@ mod size;
 pub use board::{BUNDLED, Board, BoardInfo, Layout, Range, bundled};
 pub use config::{DeviceAlias, ProjectApp, ProjectFile, ProjectKernel, UserConfig};
 pub use resolve::{
-    Context, Inputs, Layer, Source, Sourced, TransportContext, env_option_key, resolve,
+    Context, Inputs, Layer, Resolved, Source, Sourced, TransportContext, env_option_key, resolve,
 };
 pub use size::Size;
 

@@ -7,8 +7,10 @@
 
 use std::path::PathBuf;
 
+use tock_board::Resolved;
+
 use crate::cli::Global;
-use crate::config::load_context;
+use crate::config::{load_context, project_apps};
 use crate::error::{CliError, Code};
 
 pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
@@ -22,8 +24,18 @@ pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
     beside.into_iter().chain(on_path).find(|p| p.is_file())
 }
 
-/// `tock foo ...` runs `tock-foo ...` with the resolved context in
-/// `TOCK_CONTEXT` (JSON), if it resolves.
+/// `tock foo ...` runs `tock-foo ...`.
+///
+/// The subcommand inherits two things. `TOCK_CONTEXT` is a
+/// [`Resolved`](tock_board::Resolved) document in JSON: the board, where apps
+/// go, how to place them, and the project's declared TABs -- everything
+/// needed to plan, and nothing about how a connection would be made.
+/// `TOCK_BOARD`, `TOCK_TRANSPORT` and `TOCK_DEVICE` carry the global flags
+/// forward so the subcommand can run `tock broker` and reach the device
+/// without re-deriving any of it from the command line.
+///
+/// If resolution failed, `TOCK_CONTEXT_ERROR` says why instead. A subcommand
+/// that does not touch a device can still run.
 pub(crate) fn external(g: &Global, args: Vec<String>) -> Result<(), CliError> {
     let name = &args[0];
     let exe = format!("tock-{name}");
@@ -36,9 +48,9 @@ pub(crate) fn external(g: &Global, args: Vec<String>) -> Result<(), CliError> {
     })?;
     let mut cmd = std::process::Command::new(path);
     cmd.args(&args[1..]);
-    match load_context(g) {
-        Ok(ctx) => {
-            cmd.env("TOCK_CONTEXT", serde_json::to_string(&ctx).unwrap());
+    match load_context(g).and_then(|ctx| Ok(Resolved::new(&ctx, project_apps()?))) {
+        Ok(resolved) => {
+            cmd.env("TOCK_CONTEXT", serde_json::to_string(&resolved).unwrap());
         }
         Err(e) => {
             cmd.env("TOCK_CONTEXT_ERROR", e.message);

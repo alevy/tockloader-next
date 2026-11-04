@@ -20,8 +20,11 @@
 //! explain all of it.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use tock_image::{Placement, Region};
 
 use crate::{Board, Error, FileSource, ProjectFile, UserConfig};
 
@@ -101,6 +104,48 @@ impl Context {
             .iter()
             .map(|(k, v)| (k.clone(), v.value.clone()))
             .collect()
+    }
+}
+
+/// What `tock` hands a subcommand, as JSON in `TOCK_CONTEXT`.
+///
+/// Deliberately narrower than [`Context`]: everything a client needs to plan
+/// against this board, and nothing about how the connection was made. A
+/// client never opens a transport -- it reaches the device through
+/// `tock broker` -- so transport names, options and their provenance are none
+/// of its business, and leaving them out keeps this a contract we can keep
+/// rather than a dump of whatever `Context` happens to hold.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Resolved {
+    pub board: String,
+    pub arch: String,
+    /// Where apps live, and the rules for placing them there.
+    pub apps: Region,
+    pub placement: Placement,
+    /// RAM available to an app, when the board file says. Used to rule out
+    /// fixed-address builds that cannot run here.
+    pub app_ram: Option<Region>,
+    /// The project's `[[app]]` entries, resolved to absolute paths, so a
+    /// client installing "whatever this project declares" need not find or
+    /// parse `Tock.toml` itself.
+    pub project_apps: Vec<PathBuf>,
+}
+
+impl Resolved {
+    pub fn new(context: &Context, project_apps: Vec<PathBuf>) -> Resolved {
+        Resolved {
+            board: context.board.board.name.clone(),
+            arch: context.board.board.arch.clone(),
+            apps: context.board.app_region(),
+            placement: context.board.layout.placement.clone(),
+            // As a Region, not the bare tuple the planner takes: `[start,
+            // size]` in JSON is a worse contract than named fields.
+            app_ram: context
+                .board
+                .app_ram()
+                .map(|(start, size)| Region { start, size }),
+            project_apps,
+        }
     }
 }
 
@@ -509,6 +554,35 @@ mod tests {
         assert_eq!(ctx.board.app_region().start, 0x50000);
         // Inherited from the base board, not restated by the override.
         assert_eq!(ctx.board.layout.flash.size.0, 1024 * 1024);
+    }
+
+    #[test]
+    fn the_exported_document_round_trips_and_carries_no_transport_detail() {
+        let project = ProjectFile::parse(
+            "Tock.toml",
+            "board = \"nrf52840dk\"\ntransport = \"openocd\"\n\
+             [transports.openocd]\nconfig = [\"secret.cfg\"]\n",
+        )
+        .unwrap();
+        let ctx = resolve(
+            &inputs(Layer::default(), Some(("Tock.toml".into(), &project)), None),
+            &Files(vec![]),
+        )
+        .unwrap();
+        let exported = Resolved::new(&ctx, vec![PathBuf::from("/repo/blink.tab")]);
+        let json = serde_json::to_string(&exported).unwrap();
+
+        // What a client plans with survives the trip.
+        let back: Resolved = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.board, "nrf52840dk");
+        assert_eq!(back.arch, "cortex-m4");
+        assert_eq!(back.apps, ctx.board.app_region());
+        assert_eq!(back.project_apps, vec![PathBuf::from("/repo/blink.tab")]);
+
+        // How we reached the device does not.
+        assert!(!json.contains("openocd"), "{json}");
+        assert!(!json.contains("secret.cfg"), "{json}");
+        assert!(!json.contains("Tock.toml"), "{json}");
     }
 
     #[test]

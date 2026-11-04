@@ -70,6 +70,20 @@ pub(crate) fn load_project() -> Result<Option<(String, ProjectFile)>, CliError> 
     Ok(Some((origin.clone(), ProjectFile::parse(&origin, &text)?)))
 }
 
+/// The project's `[[app]]` entries as absolute paths, empty if there is no
+/// project or it declares none. Relative to the file that declared them, not
+/// to the working directory.
+pub(crate) fn project_apps() -> Result<Vec<PathBuf>, CliError> {
+    let Some((origin, project)) = load_project()? else {
+        return Ok(Vec::new());
+    };
+    let dir = Path::new(&origin)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    Ok(project.apps.iter().map(|a| dir.join(&a.tab)).collect())
+}
+
 pub(crate) fn load_context(g: &Global) -> Result<Context, CliError> {
     let project = load_project()?;
     let user = match user_config_path().filter(|p| p.is_file()) {
