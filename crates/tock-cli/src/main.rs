@@ -23,7 +23,6 @@ mod broker;
 mod cli;
 mod config;
 mod device;
-mod error;
 mod external;
 
 use std::process::ExitCode;
@@ -35,8 +34,8 @@ use apps::{install, list, uninstall};
 use broker::broker;
 use cli::{Cli, Command, ConfigCommand, Format};
 use config::config_show;
-use error::CliError;
 use external::external;
+use tock_client::CliError;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();

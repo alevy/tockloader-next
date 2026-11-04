@@ -21,6 +21,7 @@ path = "transports/openocd.rs"
 [dependencies]
 tbf.workspace = true
 tock-board.workspace = true
+tock-client.workspace = true
 tock-image.workspace = true
 tock-proto.workspace = true
 serde.workspace = true

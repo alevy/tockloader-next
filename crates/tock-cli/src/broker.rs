@@ -11,15 +11,16 @@
 
 use tock_proto::{Connection, ProtoError, Request, Response};
 
+use tock_client::{CliError, Session};
+
 use crate::cli::Global;
 use crate::config::load_context;
-use crate::device::{self, Device};
-use crate::error::CliError;
+use crate::device;
 
 pub(crate) struct Broker {
     context: tock_board::Context,
     trace: bool,
-    device: Option<Device>,
+    device: Option<Session>,
 }
 
 impl Broker {
@@ -34,9 +35,9 @@ impl Broker {
     /// Open on demand. A failure to open is fatal to the connection -- there
     /// will never be a device -- so it travels as an error rather than a
     /// response, carrying whatever the CLI would have told the user.
-    fn device(&mut self) -> Result<&mut Device, ProtoError> {
+    fn device(&mut self) -> Result<&mut Session, ProtoError> {
         if self.device.is_none() {
-            let opened = Device::connect(&self.context, self.trace).map_err(fatal)?;
+            let opened = device::open(&self.context, self.trace).map_err(fatal)?;
             self.device = Some(opened);
         }
         Ok(self.device.as_mut().expect("just opened"))
@@ -88,5 +89,5 @@ pub(crate) fn broker(g: &Global) -> Result<(), CliError> {
         std::io::stdout().lock(),
         &mut broker,
     )
-    .map_err(device::proto)
+    .map_err(tock_client::proto)
 }

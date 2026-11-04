@@ -8,55 +8,37 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tock_board::Context;
-use tock_image::{Discovered, Flash, NeedRead, NewApp, Request};
+use tock_client::{CliError, Code, Session};
+use tock_image::{Discovered, Flash, NewApp, Request};
 use tock_proto::Capability;
 
 use crate::cli::{ChangeArgs, Format, Global};
 use crate::config::{load_context, project_apps};
-use crate::device::Device;
-use crate::error::{CliError, Code};
-
-/// Run `step` until it stops asking for bytes, reading them from the device.
-pub(crate) fn with_reads<T>(
-    device: &mut Device,
-    flash: &mut Flash,
-    mut step: impl FnMut(&Flash) -> Result<T, NeedRead>,
-) -> Result<T, CliError> {
-    loop {
-        match step(flash) {
-            Ok(v) => return Ok(v),
-            Err(NeedRead { ranges }) => {
-                for (address, data) in device.read_ranges(&ranges)? {
-                    flash.insert(address, &data);
-                }
-            }
-        }
-    }
-}
+use crate::device;
 
 pub(crate) fn discover(
     ctx: &Context,
-    device: &mut Device,
+    session: &mut Session,
 ) -> Result<(Flash, Discovered), CliError> {
-    device.require(Capability::MemoryRead, "reading apps")?;
+    session.require(Capability::MemoryRead, "reading apps")?;
     let region = ctx.board.app_region();
     let mut flash = Flash::new(&region);
-    let found = with_reads(device, &mut flash, |f| tock_image::discover(&region, f))?;
+    let found = session.with_reads(&mut flash, |f| tock_image::discover(&region, f))?;
     Ok((flash, found))
 }
 
 pub(crate) fn list(g: &Global) -> Result<(), CliError> {
     let ctx = load_context(g)?;
-    let mut device = Device::connect(&ctx, g.trace_protocol)?;
-    if device.capabilities.contains(&Capability::Apps)
-        && !device.capabilities.contains(&Capability::MemoryRead)
+    let mut session = device::open(&ctx, g.trace_protocol)?;
+    if session.capabilities.contains(&Capability::Apps)
+        && !session.capabilities.contains(&Capability::MemoryRead)
     {
         return Err(CliError::new(
             Code::Capability,
             "app-level transports are not wired up in the spike yet",
         ));
     }
-    let (_, found) = discover(&ctx, &mut device)?;
+    let (_, found) = discover(&ctx, &mut session)?;
     let region = ctx.board.app_region();
     let apps: Vec<_> = found
         .apps()
@@ -205,27 +187,27 @@ pub(crate) fn change_apps(
 ) -> Result<(), CliError> {
     let region = ctx.board.app_region();
     let placement = &ctx.board.layout.placement;
-    let mut device = Device::connect(ctx, g.trace_protocol)?;
+    let mut session = device::open(ctx, g.trace_protocol)?;
     if !change.dry_run {
-        device.require(Capability::MemoryWrite, "changing apps")?;
+        session.require(Capability::MemoryWrite, "changing apps")?;
     }
-    let (mut flash, found) = discover(ctx, &mut device)?;
+    let (mut flash, found) = discover(ctx, &mut session)?;
     let plan = tock_image::plan(&region, placement, ctx.board.app_ram(), &found, &request)
         .map_err(plan_error)?;
-    let write_gap = device.write_gap();
-    let writes = with_reads(&mut device, &mut flash, |f| {
+    let write_gap = device::WRITE_GAP;
+    let writes = session.with_reads(&mut flash, |f| {
         tock_image::render(&region, &plan, f, write_gap)
     })?;
 
     if !change.dry_run {
-        device.write_runs(&writes)?;
+        session.write_runs(&writes)?;
         // Verify by reading back. Reads coalesce, so a reply can cover several
         // runs; find the one that contains each and compare that slice.
         let ranges: Vec<(u64, u64)> = writes
             .iter()
             .map(|w| (w.address, w.data.len() as u64))
             .collect();
-        let read_back = device.read_ranges(&ranges)?;
+        let read_back = session.read_ranges(&ranges)?;
         for w in &writes {
             let end = w.address + w.data.len() as u64;
             let got = read_back

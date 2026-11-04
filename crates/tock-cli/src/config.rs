@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use tock_board::{Context, FileSource, Inputs, Layer, ProjectFile, UserConfig};
 
 use crate::cli::{Format, Global};
-use crate::error::{CliError, Code};
+use tock_client::{CliError, Code};
 
 struct Fs;
 

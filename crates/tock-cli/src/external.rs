@@ -15,7 +15,7 @@ use tock_board::Resolved;
 use crate::broker::Broker;
 use crate::cli::Global;
 use crate::config::{load_context, project_apps};
-use crate::error::{CliError, Code};
+use tock_client::{CliError, Code};
 
 pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
     let beside = std::env::current_exe()

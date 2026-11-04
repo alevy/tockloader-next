@@ -1,0 +1,13 @@
+[package]
+name = "tock-client"
+description = "What a `tock-<name>` subcommand needs: the connection it was handed, the board it was told about, and the loop that drives a plan onto a device."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tock-board.workspace = true
+tock-image.workspace = true
+tock-proto.workspace = true
+serde_json.workspace = true
