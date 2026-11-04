@@ -116,7 +116,7 @@ pub fn open_connection(
 ) -> Result<(Box<dyn Connection>, Option<Child>), CliError> {
     let name = &ctx.transport.name.value;
     let exe = format!("tock-transport-{name}");
-    let path = crate::find_executable(&exe).ok_or_else(|| {
+    let path = crate::external::find_executable(&exe).ok_or_else(|| {
         CliError::new(
             Code::Config,
             format!(
