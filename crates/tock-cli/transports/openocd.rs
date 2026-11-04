@@ -24,7 +24,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tempfile::NamedTempFile;
-use tock_proto::{Capability, ErrorKind, Handler, Options, Request, Response};
+use tock_proto::{Capability, Connection, ErrorKind, Options, ProtoError, Request, Response};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const STARTUP_POLL: Duration = Duration::from_millis(10);
@@ -32,6 +32,38 @@ const STARTUP_POLL: Duration = Duration::from_millis(10);
 /// Separates the fields of a TCL reply. A control byte, so it cannot collide
 /// with a path or an openocd message.
 const FIELD: char = '\u{1f}';
+
+/// Either kind of failure, so one `?` chain can carry both.
+///
+/// The distinction is whether there is still an answer to give. An operation
+/// that failed has one, and the client may send more; a connection that failed
+/// has none, and nothing further can be sent. Kept here rather than shared:
+/// `file.rs` has no second kind, and a helper designed against one consumer is
+/// a guess.
+enum Failure {
+    /// Answer the client with this. The connection is fine.
+    Operation(Box<Response>),
+    /// There is no answer to give.
+    Connection(ProtoError),
+}
+
+impl From<Response> for Failure {
+    fn from(r: Response) -> Failure {
+        Failure::Operation(Box::new(r))
+    }
+}
+
+impl From<ProtoError> for Failure {
+    fn from(e: ProtoError) -> Failure {
+        Failure::Connection(e)
+    }
+}
+
+impl From<std::io::Error> for Failure {
+    fn from(e: std::io::Error) -> Failure {
+        Failure::Connection(e.into())
+    }
+}
 
 /// What one TCL command did. `rc` is openocd's own error code, not TCL's 0/1:
 /// anything non-zero failed.
@@ -47,9 +79,8 @@ impl TclReply {
     ///
     /// `rc` is not always a bare integer: a TCL-level error prefixes it with
     /// openocd's log line, so the code is the last whitespace-separated token.
-    fn parse(raw: &str) -> Result<TclReply, Response> {
-        let unreadable =
-            || Response::error(ErrorKind::Device, format!("unreadable TCL reply: {raw:?}"));
+    fn parse(raw: &str) -> Result<TclReply, ProtoError> {
+        let unreadable = || ProtoError::failed(format!("unreadable TCL reply: {raw:?}"));
         let mut fields = raw.splitn(3, FIELD);
         let (Some(status), Some(msg), Some(log)) = (fields.next(), fields.next(), fields.next())
         else {
@@ -199,7 +230,7 @@ impl Session {
         configs: &[String],
         debug_level: i64,
         page_size: u64,
-    ) -> Result<Session, Response> {
+    ) -> Result<Session, ProtoError> {
         // Choosing the port here means there is nothing to discover later.
         let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let port = probe.local_addr()?.port();
@@ -221,10 +252,9 @@ impl Session {
             .stderr(log.reopen()?)
             .spawn()
             .map_err(|e| {
-                Response::error(ErrorKind::Device, format!("cannot start `{command}`: {e}"))
-                    .with_suggestion(
-                        "install openocd, or specify its path with --opt command=/path/to/openocd",
-                    )
+                ProtoError::failed(format!("cannot start `{command}`: {e}")).with_suggestion(
+                    "install openocd, or specify its path with --opt command=/path/to/openocd",
+                )
             })?;
 
         let deadline = Instant::now() + STARTUP_TIMEOUT;
@@ -235,24 +265,18 @@ impl Session {
             match openocd.try_wait()? {
                 Some(status) => {
                     let detail = tail_of(&log);
-                    return Err(Response::error(
-                        ErrorKind::Device,
-                        format!(
-                            "openocd exited ({status}) before accepting a connection:\n{detail}"
-                        ),
-                    ));
+                    return Err(ProtoError::failed(format!(
+                        "openocd exited ({status}) before accepting a connection:\n{detail}"
+                    )));
                 }
                 None if Instant::now() >= deadline => {
                     let _ = openocd.kill();
                     let _ = openocd.wait();
                     let detail = tail_of(&log);
-                    return Err(Response::error(
-                        ErrorKind::Device,
-                        format!(
-                            "openocd did not open its TCL port within {}s:\n{detail}",
-                            STARTUP_TIMEOUT.as_secs()
-                        ),
-                    ));
+                    return Err(ProtoError::failed(format!(
+                        "openocd did not open its TCL port within {}s:\n{detail}",
+                        STARTUP_TIMEOUT.as_secs()
+                    )));
                 }
                 None => std::thread::sleep(STARTUP_POLL),
             }
@@ -266,12 +290,19 @@ impl Session {
         };
         // Flash operations need a halted target, and holding it halted for the
         // session keeps every later request working the same way.
-        session.run("halt")?;
+        // No usable session without a halted target, so this is fatal too.
+        session.run("halt").map_err(|e| match e {
+            Failure::Connection(e) => e,
+            Failure::Operation(r) => ProtoError::failed(match *r {
+                Response::Error { message, .. } => message,
+                other => format!("{other:?}"),
+            }),
+        })?;
         Ok(session)
     }
 
     /// Send one command and return its reply, whether or not it succeeded.
-    fn tcl_cmd(&mut self, cmd: &str) -> Result<TclReply, Response> {
+    fn tcl_cmd(&mut self, cmd: &str) -> Result<TclReply, ProtoError> {
         // `capture` outside `catch` keeps the status while collecting whatever
         // the command logged; inside, it would swallow the status.
         let wrapped = format!(
@@ -280,10 +311,9 @@ impl Session {
         // openocd dying mid-session shows up here as a broken pipe or a short
         // read; either way its last words are in the log, not in the error.
         let died = |detail: String| {
-            Response::error(
-                ErrorKind::Device,
-                format!("openocd stopped responding during `{cmd}`: {detail}"),
-            )
+            ProtoError::failed(format!(
+                "openocd stopped responding during `{cmd}`: {detail}"
+            ))
         };
         let sock = self.tcl.get_mut();
         sock.write_all(wrapped.as_bytes())
@@ -304,7 +334,7 @@ impl Session {
     }
 
     /// Read a range into memory, via a temp file openocd writes.
-    fn dump(&mut self, address: u64, len: u64) -> Result<Vec<u8>, Response> {
+    fn dump(&mut self, address: u64, len: u64) -> Result<Vec<u8>, Failure> {
         let scratch = NamedTempFile::new()?;
         let path = scratch.path().display().to_string();
         self.run(&format!("dump_image {path} {address:#x} {len}"))?;
@@ -319,14 +349,15 @@ impl Session {
                     "openocd dumped {} bytes of the {len} requested at {address:#x}",
                     data.len()
                 ),
-            ));
+            )
+            .into());
         }
         Ok(data)
     }
 
     /// Write bytes, erasing the sectors they touch. Whole sectors only: see
     /// `OpenocdTransport::write`.
-    fn program(&mut self, address: u64, data: &[u8]) -> Result<(), Response> {
+    fn program(&mut self, address: u64, data: &[u8]) -> Result<(), Failure> {
         let mut scratch = NamedTempFile::new()?;
         scratch.write_all(data)?;
         scratch.flush()?;
@@ -336,13 +367,14 @@ impl Session {
     }
 
     /// Send one command and fail if openocd did.
-    fn run(&mut self, cmd: &str) -> Result<TclReply, Response> {
+    fn run(&mut self, cmd: &str) -> Result<TclReply, Failure> {
         let reply = self.tcl_cmd(cmd)?;
         if reply.failed() {
             return Err(Response::error(
                 ErrorKind::Device,
                 format!("openocd: {}", reply.message()),
-            ));
+            )
+            .into());
         }
         Ok(reply)
     }
@@ -383,7 +415,7 @@ pub struct OpenocdTransport {
 }
 
 impl OpenocdTransport {
-    fn open(&mut self, options: Options<'_>) -> Result<(), Response> {
+    fn open(&mut self, options: Options<'_>) -> Result<(), Failure> {
         // Replace any previous session, so its openocd is killed by Drop.
         self.session = None;
         let configs = resolve_configs(&options);
@@ -395,7 +427,8 @@ impl OpenocdTransport {
             .with_suggestion(
                 "add --opt config=board/nordic_nrf52_dk.cfg\n\
                  or give the board file a [connection.openocd] config = [...] entry",
-            ));
+            )
+            .into());
         }
         let command = options
             .get("command")
@@ -412,13 +445,13 @@ impl OpenocdTransport {
         Ok(())
     }
 
-    fn session(&mut self) -> Result<&mut Session, Response> {
+    fn session(&mut self) -> Result<&mut Session, Failure> {
         self.session
             .as_mut()
-            .ok_or_else(|| Response::error(ErrorKind::InvalidRequest, "not open"))
+            .ok_or_else(|| Response::error(ErrorKind::InvalidRequest, "not open").into())
     }
 
-    fn read(&mut self, address: u64, len: u64) -> Result<Vec<u8>, Response> {
+    fn read(&mut self, address: u64, len: u64) -> Result<Vec<u8>, Failure> {
         if len == 0 {
             return Ok(Vec::new());
         }
@@ -429,7 +462,7 @@ impl OpenocdTransport {
     /// sectors. So anything that does not land on sector boundaries is read
     /// back, overlaid, and written whole -- otherwise `erase` would take the
     /// neighbours with it.
-    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Response> {
+    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Failure> {
         let session = self.session()?;
         match write_plan(session.page_size, address, data.len() as u64) {
             None => Ok(()),
@@ -447,7 +480,7 @@ impl OpenocdTransport {
         &mut self,
         request: Request,
         payload: Vec<u8>,
-    ) -> Result<(Response, Vec<u8>), Response> {
+    ) -> Result<(Response, Vec<u8>), Failure> {
         match request {
             Request::Hello { .. } => Ok((
                 Response::Hello {
@@ -488,15 +521,26 @@ impl OpenocdTransport {
             other => Err(Response::error(
                 ErrorKind::Unsupported,
                 format!("openocd transport does not support {other:?}"),
-            )),
+            )
+            .into()),
         }
     }
 }
 
-impl Handler for OpenocdTransport {
-    fn handle(&mut self, request: Request, payload: Vec<u8>) -> (Response, Vec<u8>) {
-        self.dispatch(request, payload)
-            .unwrap_or_else(|e| (e, vec![]))
+impl Connection for OpenocdTransport {
+    fn call(
+        &mut self,
+        request: Request,
+        payload: Vec<u8>,
+    ) -> Result<(Response, Vec<u8>), tock_proto::ProtoError> {
+        match self.dispatch(request, payload) {
+            Ok(answer) => Ok(answer),
+            // The operation failed but the session is fine: the client gets a
+            // response and may send more.
+            Err(Failure::Operation(response)) => Ok((*response, vec![])),
+            // There is no response to give.
+            Err(Failure::Connection(e)) => Err(e),
+        }
     }
 }
 

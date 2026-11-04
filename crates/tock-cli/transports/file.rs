@@ -10,7 +10,7 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use tock_proto::{Capability, ErrorKind, FlashInfo, Handler, Options, Request, Response};
+use tock_proto::{Capability, Connection, ErrorKind, FlashInfo, Options, Request, Response};
 
 #[derive(Default)]
 pub struct FileTransport {
@@ -115,8 +115,12 @@ fn check_range(flash: &FlashInfo, address: u64, len: u64) -> Result<(), Response
     Ok(())
 }
 
-impl Handler for FileTransport {
-    fn handle(&mut self, request: Request, payload: Vec<u8>) -> (Response, Vec<u8>) {
+impl Connection for FileTransport {
+    fn call(
+        &mut self,
+        request: Request,
+        payload: Vec<u8>,
+    ) -> Result<(Response, Vec<u8>), tock_proto::ProtoError> {
         let result = match request {
             Request::Hello { .. } => Ok((
                 Response::Hello {
@@ -149,7 +153,7 @@ impl Handler for FileTransport {
                 format!("file transport does not support {other:?}"),
             )),
         };
-        result.unwrap_or_else(|e| (e, vec![]))
+        Ok(result.unwrap_or_else(|e| (e, vec![])))
     }
 }
 

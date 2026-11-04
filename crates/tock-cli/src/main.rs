@@ -565,21 +565,27 @@ fn broker(g: &Global) -> Result<(), CliError> {
             None
         }
     }
-    impl tock_proto::Handler for Broker {
-        fn handle(
+    /// The broker is both roles at once: it answers its own client while
+    /// calling the transport beneath it, which is how a third-party
+    /// subcommand reaches a device it never opened. With one trait that is
+    /// just delegation.
+    impl tock_proto::Connection for Broker {
+        fn call(
             &mut self,
             request: tock_proto::Request,
             payload: Vec<u8>,
-        ) -> (tock_proto::Response, Vec<u8>) {
+        ) -> Result<(tock_proto::Response, Vec<u8>), tock_proto::ProtoError> {
             use tock_proto::{Request as Rq, Response as Rs};
             if let Some(problem) = self.check(&request, &payload) {
-                return (
+                return Ok((
                     Rs::error(tock_proto::ErrorKind::InvalidRequest, problem),
                     vec![],
-                );
+                ));
             }
             match request {
-                Rq::Hello { .. } => (
+                // Answered here: the transport was already opened with the
+                // resolved context before this client connected.
+                Rq::Hello { .. } => Ok((
                     Rs::Hello {
                         protocol: tock_proto::PROTOCOL_VERSION,
                         transport: self.device.transport.clone(),
@@ -587,17 +593,13 @@ fn broker(g: &Global) -> Result<(), CliError> {
                         capabilities: self.device.capabilities.clone(),
                     },
                     vec![],
-                ),
-                Rq::Open { .. } | Rq::Close => (Rs::Ok, vec![]),
-                other => self.device.forward(&other, &payload).unwrap_or_else(|e| {
-                    (
-                        Rs::error(tock_proto::ErrorKind::Device, e.to_string()),
-                        vec![],
-                    )
-                }),
+                )),
+                Rq::Open { .. } | Rq::Close => Ok((Rs::Ok, vec![])),
+                other => self.device.forward(other, payload),
             }
         }
     }
+
     let layout = &ctx.board.layout;
     let mut broker = Broker {
         board: ctx.board.board.name.clone(),

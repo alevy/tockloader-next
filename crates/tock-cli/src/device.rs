@@ -8,7 +8,7 @@ use std::process::{Child, Command, Stdio};
 
 use tock_board::Context;
 use tock_image::{WriteRun, coalesce};
-use tock_proto::{Capability, Channel, FlashInfo, ProtoError, Request, Response, StreamChannel};
+use tock_proto::{Capability, Connection, FlashInfo, ProtoError, Request, Response, StreamChannel};
 
 use crate::error::{CliError, Code};
 
@@ -34,7 +34,7 @@ const READ_GAP: u64 = 256;
 const WRITE_GAP: u64 = 4095;
 
 pub struct Device {
-    channel: Box<dyn Channel>,
+    connection: Box<dyn Connection>,
     child: Option<Child>,
     pub transport: String,
     pub capabilities: Vec<Capability>,
@@ -79,18 +79,19 @@ fn option_bases(ctx: &Context, cwd: &Path) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Logs every message to stderr (`--trace-protocol`).
-struct Traced(Box<dyn Channel>);
+/// A [`Connection`] that logs every message to stderr (`--trace-protocol`)
+/// and forwards it. One trait for both ends is what makes this ordinary.
+struct Traced(Box<dyn Connection>);
 
-impl Channel for Traced {
+impl Connection for Traced {
     fn call(
         &mut self,
-        request: &Request,
-        payload: &[u8],
+        request: Request,
+        payload: Vec<u8>,
     ) -> Result<(Response, Vec<u8>), ProtoError> {
         eprintln!(
             "-> {} (+{} bytes)",
-            serde_json::to_string(request).unwrap(),
+            serde_json::to_string(&request).unwrap(),
             payload.len()
         );
         let r = self.0.call(request, payload);
@@ -109,10 +110,10 @@ impl Channel for Traced {
 /// Open the transport named in the context. Every transport is an executable
 /// `tock-transport-<name>`, found next to `tock` or on `PATH` -- including the
 /// `file` transport, which ships alongside `tock` but is not special.
-pub fn open_channel(
+pub fn open_connection(
     ctx: &Context,
     trace: bool,
-) -> Result<(Box<dyn Channel>, Option<Child>), CliError> {
+) -> Result<(Box<dyn Connection>, Option<Child>), CliError> {
     let name = &ctx.transport.name.value;
     let exe = format!("tock-transport-{name}");
     let path = crate::find_executable(&exe).ok_or_else(|| {
@@ -137,26 +138,26 @@ pub fn open_channel(
                 format!("cannot start {}: {e}", path.display()),
             )
         })?;
-    let channel = StreamChannel {
+    let stream = StreamChannel {
         reader: child.stdout.take().unwrap(),
         writer: child.stdin.take().unwrap(),
     };
-    let channel: Box<dyn Channel> = if trace {
-        Box::new(Traced(Box::new(channel)))
+    let connection: Box<dyn Connection> = if trace {
+        Box::new(Traced(Box::new(stream)))
     } else {
-        Box::new(channel)
+        Box::new(stream)
     };
-    Ok((channel, Some(child)))
+    Ok((connection, Some(child)))
 }
 
 impl Device {
     pub fn connect(ctx: &Context, trace: bool) -> Result<Device, CliError> {
-        let (mut channel, child) = open_channel(ctx, trace)?;
+        let (mut connection, child) = open_connection(ctx, trace)?;
         let hello = Request::Hello {
             protocol: tock_proto::PROTOCOL_VERSION,
             client: format!("tock {}", env!("CARGO_PKG_VERSION")),
         };
-        let (transport, capabilities) = match channel.call_ok(&hello, &[]).map_err(proto)? {
+        let (transport, capabilities) = match answered(connection.call(hello, vec![]))? {
             (
                 Response::Hello {
                     protocol,
@@ -193,9 +194,9 @@ impl Device {
             options: options.as_object().cloned().unwrap_or_default(),
             option_bases: option_bases(ctx, &cwd),
         };
-        channel.call_ok(&open, &[]).map_err(proto)?;
+        answered(connection.call(open, vec![]))?;
         Ok(Device {
-            channel,
+            connection,
             child,
             transport,
             capabilities,
@@ -223,10 +224,7 @@ impl Device {
     pub fn read_ranges(&mut self, ranges: &[(u64, u64)]) -> Result<Vec<(u64, Vec<u8>)>, CliError> {
         let mut out = Vec::new();
         for (address, len) in coalesce(ranges, READ_GAP) {
-            let (_, data) = self
-                .channel
-                .call_ok(&Request::Read { address, len }, &[])
-                .map_err(proto)?;
+            let (_, data) = answered(self.connection.call(Request::Read { address, len }, vec![]))?;
             // A short reply would leave the caller's read loop asking for the
             // same bytes forever. Say so instead of hanging.
             if data.len() as u64 != len {
@@ -248,14 +246,12 @@ impl Device {
     /// as it stands; erase granularity is the transport's business.
     pub fn write_runs(&mut self, runs: &[WriteRun]) -> Result<(), CliError> {
         for run in runs {
-            self.channel
-                .call_ok(
-                    &Request::Write {
-                        address: run.address,
-                    },
-                    &run.data,
-                )
-                .map_err(proto)?;
+            answered(self.connection.call(
+                Request::Write {
+                    address: run.address,
+                },
+                run.data.clone(),
+            ))?;
         }
         Ok(())
     }
@@ -269,39 +265,63 @@ impl Device {
     /// Forward a raw request (used by `tock broker`).
     pub fn forward(
         &mut self,
-        request: &Request,
-        payload: &[u8],
+        request: Request,
+        payload: Vec<u8>,
     ) -> Result<(Response, Vec<u8>), ProtoError> {
-        self.channel.call(request, payload)
+        self.connection.call(request, payload)
     }
 }
 
 impl Drop for Device {
     fn drop(&mut self) {
-        let _ = self.channel.call(&Request::Close, &[]);
+        let _ = self.connection.call(Request::Close, vec![]);
         if let Some(child) = &mut self.child {
             let _ = child.wait();
         }
     }
 }
 
-pub fn proto(e: ProtoError) -> CliError {
-    match e {
-        ProtoError::Remote {
-            message,
-            suggestion,
-            ..
-        } => {
+/// Reduce both kinds of failure to the CLI's error type: a dead connection,
+/// and a response that says the operation failed. Only this function knows
+/// the difference matters, which is why `Response::Error` is not re-encoded
+/// as a protocol error on the way here.
+pub fn answered(
+    result: Result<(Response, Vec<u8>), ProtoError>,
+) -> Result<(Response, Vec<u8>), CliError> {
+    match result {
+        Err(e) => Err(proto(e)),
+        Ok((
+            Response::Error {
+                message,
+                suggestion,
+                ..
+            },
+            _,
+        )) => {
             let mut err = CliError::new(Code::Device, message);
             // A transport owns the whole sentence, and may offer more than one
             // remedy: one hint per line.
             for hint in suggestion.iter().flat_map(|s| s.lines()) {
                 err = err.hint(hint);
             }
-            err
+            Err(err)
         }
-        e => CliError::new(Code::Device, e.to_string()),
+        ok => ok.map_err(proto),
     }
+}
+
+pub fn proto(e: ProtoError) -> CliError {
+    let mut err = CliError::new(Code::Device, e.to_string());
+    if let ProtoError::Failed {
+        suggestion: Some(hint),
+        ..
+    } = &e
+    {
+        for line in hint.lines() {
+            err = err.hint(line);
+        }
+    }
+    err
 }
 
 #[cfg(test)]
@@ -310,11 +330,11 @@ mod tests {
 
     /// Answers every read with fewer bytes than asked for.
     struct Stingy;
-    impl Channel for Stingy {
+    impl Connection for Stingy {
         fn call(
             &mut self,
-            _request: &Request,
-            _payload: &[u8],
+            _request: Request,
+            _payload: Vec<u8>,
         ) -> Result<(Response, Vec<u8>), ProtoError> {
             Ok((Response::Data, vec![0xFF; 4]))
         }
@@ -323,7 +343,7 @@ mod tests {
     #[test]
     fn a_short_read_is_an_error_not_a_silent_retry() {
         let mut device = Device {
-            channel: Box::new(Stingy),
+            connection: Box::new(Stingy),
             child: None,
             transport: "stingy".into(),
             capabilities: vec![Capability::MemoryRead],

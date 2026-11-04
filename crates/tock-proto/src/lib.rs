@@ -4,12 +4,12 @@
 //!
 //! Two roles, and every participant is one or the other.
 //!
-//! A **responder** implements [`Handler`]: it receives a [`Request`] and
+//! A **responder** implements [`Connection`]: it receives a [`Request`] and
 //! answers with a [`Response`]. Transports are responders, and so is
 //! `tock broker`. This is the extension point -- writing a transport means
 //! implementing this trait and nothing else.
 //!
-//! A **caller** holds a [`Channel`] and sends requests over it. `tock` is a
+//! A **caller** holds a [`Connection`] and sends requests over it. `tock` is a
 //! caller when it drives a transport; an external `tock-<name>` subcommand is
 //! a caller when it drives `tock broker`. Note that the broker is both at
 //! once: it answers its own client while calling the transport beneath it,
@@ -198,52 +198,42 @@ pub struct AppInfo {
 // ---------------------------------------------------------------------------
 // The two roles
 
-/// Answers requests: every transport, and `tock broker`.
+/// Something you send a [`Request`] to and get a [`Response`] back from.
 ///
-/// This is the extension point. A new transport implements this and nothing
-/// else -- `serve` supplies the loop, the framing and the lifecycle.
-pub trait Handler {
-    fn handle(&mut self, request: Request, payload: Vec<u8>) -> (Response, Vec<u8>);
-}
-
-/// Sends requests and waits for their answers.
+/// One trait for both ends, because it is one operation. A transport
+/// implements it by doing the work; [`StreamChannel`] implements it by
+/// forwarding over a byte stream; `tock broker` implements it by delegating
+/// to another `Connection`. `serve` is the inverse adapter: it puts a local
+/// implementation behind a stream, so the thing on the other side can hold a
+/// `StreamChannel` and not care which it is talking to.
 ///
-/// Unlike [`Handler`] this is not an extension point -- it is a seam. One
-/// implementation does the real work ([`StreamChannel`]); the trait exists so
-/// `tock` can substitute others: a decorator that logs every message for
-/// `--trace-protocol`, a stub in tests, and eventually an in-process carrier
-/// for a host that embeds a transport rather than spawning one.
-pub trait Channel {
+/// # The two kinds of failure
+///
+/// They are different and must stay so:
+///
+/// - **The operation failed.** `Ok(Response::Error { .. })`. The device said
+///   no, the address was out of range, the image is missing. The connection
+///   is fine and the caller may send more.
+/// - **The connection failed.** `Err(..)`. The pipe broke, a frame was
+///   malformed, the peer went away. Nothing further can be sent.
+///
+/// An implementation that cannot fail at the second level simply never
+/// returns `Err`, the way an in-memory writer never fails.
+pub trait Connection {
     fn call(
         &mut self,
-        request: &Request,
-        payload: &[u8],
+        request: Request,
+        payload: Vec<u8>,
     ) -> Result<(Response, Vec<u8>), ProtoError>;
-
-    /// Like `call`, but a `Response::Error` becomes `Err`.
-    fn call_ok(
-        &mut self,
-        request: &Request,
-        payload: &[u8],
-    ) -> Result<(Response, Vec<u8>), ProtoError> {
-        match self.call(request, payload)? {
-            (
-                Response::Error {
-                    kind,
-                    message,
-                    suggestion,
-                },
-                _,
-            ) => Err(ProtoError::Remote {
-                kind,
-                message,
-                suggestion,
-            }),
-            ok => Ok(ok),
-        }
-    }
 }
 
+/// A failure of the connection itself, never of the operation -- an operation
+/// that failed is a [`Response::Error`], which is an `Ok`.
+///
+/// [`ProtoError::Failed`] carries the same detail a [`Response::Error`] would,
+/// because the commonest fatal cases are the user's to fix -- openocd is not
+/// installed, a config file is missing -- and telling them so is worth as much
+/// here as anywhere.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtoError {
     #[error("i/o: {0}")]
@@ -252,14 +242,35 @@ pub enum ProtoError {
     Json(#[from] serde_json::Error),
     #[error("peer closed the connection")]
     Closed,
-    #[error("{message}")]
-    Remote {
-        kind: ErrorKind,
-        message: String,
-        suggestion: Option<String>,
-    },
     #[error("unexpected response: {0:?}")]
     Unexpected(Box<Response>),
+    /// The connection could not be established, or has failed for good.
+    #[error("{message}")]
+    Failed {
+        message: String,
+        /// What the user might do about it, in whole sentences. One per line.
+        suggestion: Option<String>,
+    },
+}
+
+impl ProtoError {
+    pub fn failed(message: impl Into<String>) -> ProtoError {
+        ProtoError::Failed {
+            message: message.into(),
+            suggestion: None,
+        }
+    }
+
+    /// Attach the line the CLI prints as `try: ...`.
+    pub fn with_suggestion(self, hint: impl Into<String>) -> ProtoError {
+        match self {
+            ProtoError::Failed { message, .. } => ProtoError::Failed {
+                message,
+                suggestion: Some(hint.into()),
+            },
+            other => other,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -281,30 +292,45 @@ pub struct StreamChannel<R: Read, W: Write> {
     pub writer: W,
 }
 
-impl<R: Read, W: Write> Channel for StreamChannel<R, W> {
+impl<R: Read, W: Write> Connection for StreamChannel<R, W> {
     fn call(
         &mut self,
-        request: &Request,
-        payload: &[u8],
+        request: Request,
+        payload: Vec<u8>,
     ) -> Result<(Response, Vec<u8>), ProtoError> {
-        write_frame(&mut self.writer, request, payload)?;
+        write_frame(&mut self.writer, &request, &payload)?;
         read_frame(&mut self.reader)?.ok_or(ProtoError::Closed)
     }
 }
 
-/// Serve requests from a stream until `Close` or end of stream. Used by
-/// transport plugins (`tock-transport-*`) and `tock broker`.
-pub fn serve<R: Read, W: Write, H: Handler>(
+/// Put a [`Connection`] behind a byte stream: read requests, answer them,
+/// until `Close` or end of stream. The inverse of [`StreamChannel`], and what
+/// every `tock-transport-*` executable runs in `main`.
+///
+/// A connection-level failure is reported to the peer as a [`Response::Error`]
+/// -- it is waiting for a frame and would otherwise hang -- and then ends the
+/// loop, since by definition nothing further can be sent. That counts as
+/// having done the job, so it is an `Ok`: the peer has the message, including
+/// any suggestion, and decides what the user's command exits with. Returning
+/// an error here as well would only print the same sentence twice.
+pub fn serve<R: Read, W: Write, C: Connection>(
     mut reader: R,
     mut writer: W,
-    handler: &mut H,
+    connection: &mut C,
 ) -> Result<(), ProtoError> {
     while let Some((request, payload)) = read_frame::<_, Request>(&mut reader)? {
         let close = request == Request::Close;
-        let (response, out) = handler.handle(request, payload);
-        write_frame(&mut writer, &response, &out)?;
-        if close {
-            break;
+        match connection.call(request, payload) {
+            Ok((response, out)) => {
+                write_frame(&mut writer, &response, &out)?;
+                if close {
+                    break;
+                }
+            }
+            Err(e) => {
+                write_frame(&mut writer, &Response::from(e), &[])?;
+                return Ok(());
+            }
         }
     }
     Ok(())
@@ -392,6 +418,25 @@ impl<'a> Options<'a> {
     }
 }
 
+/// Report a connection failure to a peer that is waiting for a frame. Keeps
+/// the suggestion: a peer one hop further away needs it just as much, and
+/// `serve` is the only place a `ProtoError` turns back into a `Response`.
+impl From<ProtoError> for Response {
+    fn from(e: ProtoError) -> Response {
+        match e {
+            ProtoError::Failed {
+                message,
+                suggestion,
+            } => Response::Error {
+                kind: ErrorKind::Device,
+                message,
+                suggestion,
+            },
+            other => Response::error(ErrorKind::Device, other.to_string()),
+        }
+    }
+}
+
 /// An I/O failure inside a transport is a device error. Having the conversion
 /// here means a transport can use `?` on ordinary `std::io` calls and return
 /// `Result<_, Response>` throughout, instead of each one inventing its own
@@ -407,14 +452,18 @@ mod tests {
     use super::*;
 
     struct Echo;
-    impl Handler for Echo {
-        fn handle(&mut self, request: Request, payload: Vec<u8>) -> (Response, Vec<u8>) {
-            match request {
+    impl Connection for Echo {
+        fn call(
+            &mut self,
+            request: Request,
+            payload: Vec<u8>,
+        ) -> Result<(Response, Vec<u8>), ProtoError> {
+            Ok(match request {
                 Request::Read { len, .. } => (Response::Data, vec![0xAB; len as usize]),
                 Request::Write { .. } => (Response::Ok, vec![]),
                 Request::Close => (Response::Ok, vec![]),
                 _ => (Response::error(ErrorKind::Unsupported, "nope"), payload),
-            }
+            })
         }
     }
 

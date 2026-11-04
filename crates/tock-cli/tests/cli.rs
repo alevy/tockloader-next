@@ -302,7 +302,7 @@ fn needs_repack_suggests_flag() {
 
 #[test]
 fn the_file_transport_is_a_standalone_executable() {
-    use tock_proto::{Capability, Channel, Request, Response, StreamChannel};
+    use tock_proto::{Capability, Connection, Request, Response, StreamChannel};
     let d = Dir::new("standalone");
     d.erased("flash.bin");
 
@@ -319,12 +319,12 @@ fn the_file_transport_is_a_standalone_executable() {
         writer: child.stdin.take().unwrap(),
     };
     let (hello, _) = ch
-        .call_ok(
-            &Request::Hello {
+        .call(
+            Request::Hello {
                 protocol: 0,
                 client: "test".into(),
             },
-            &[],
+            vec![],
         )
         .unwrap();
     match hello {
@@ -339,13 +339,13 @@ fn the_file_transport_is_a_standalone_executable() {
         }
         other => panic!("{other:?}"),
     }
-    ch.call_ok(&Request::Close, &[]).unwrap();
+    ch.call(Request::Close, vec![]).unwrap();
     assert!(child.wait().unwrap().success());
 }
 
 #[test]
 fn broker_serves_the_device() {
-    use tock_proto::{Channel, Request, Response, StreamChannel};
+    use tock_proto::{Connection, Request, Response, StreamChannel};
     let d = Dir::new("broker");
     d.erased("flash.bin");
     let a = d.tab("a", 5000, None);
@@ -367,27 +367,27 @@ fn broker_serves_the_device() {
         writer: child.stdin.take().unwrap(),
     };
     let (hello, _) = ch
-        .call_ok(
-            &Request::Hello {
+        .call(
+            Request::Hello {
                 protocol: 0,
                 client: "test".into(),
             },
-            &[],
+            vec![],
         )
         .unwrap();
     assert!(matches!(hello, Response::Hello { ref transport, .. } if transport == "file"));
     let (_, data) = ch
-        .call_ok(
-            &Request::Read {
+        .call(
+            Request::Read {
                 address: 0x40000,
                 len: 16,
             },
-            &[],
+            vec![],
         )
         .unwrap();
     let header = tbf::Lengths::parse(&data).unwrap();
     assert_eq!(header.total_size, 8192);
-    ch.call_ok(&Request::Close, &[]).unwrap();
+    ch.call(Request::Close, vec![]).unwrap();
     assert!(child.wait().unwrap().success());
 }
 
@@ -671,7 +671,7 @@ fn a_non_utf8_environment_variable_does_not_break_the_tool() {
 
 #[test]
 fn the_broker_rejects_requests_outside_flash() {
-    use tock_proto::{Channel, Request, Response, StreamChannel};
+    use tock_proto::{Connection, Request, Response, StreamChannel};
     let d = Dir::new("broker_bounds");
     d.erased("flash.bin");
     let mut child = Command::new(env!("CARGO_BIN_EXE_tock"))
@@ -691,11 +691,11 @@ fn the_broker_rejects_requests_outside_flash() {
     // end must be refused here, not forwarded to the transport.
     let (r, _) = ch
         .call(
-            &Request::Read {
+            Request::Read {
                 address: 0x20_0000,
                 len: 16,
             },
-            &[],
+            vec![],
         )
         .unwrap();
     match r {
@@ -709,9 +709,35 @@ fn the_broker_rejects_requests_outside_flash() {
     }
     // A sub-page write is no longer anyone's business to refuse.
     let (r, _) = ch
-        .call(&Request::Write { address: 0x40000 }, &[0u8; 8])
+        .call(Request::Write { address: 0x40000 }, vec![0u8; 8])
         .unwrap();
     assert!(matches!(r, Response::Ok), "{r:?}");
-    ch.call_ok(&Request::Close, &[]).unwrap();
+    ch.call(Request::Close, vec![]).unwrap();
     assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn a_transport_that_cannot_start_still_says_how_to_fix_it() {
+    // openocd is not installed at that path, so the transport cannot start at
+    // all. That is fatal -- there is no session and never will be -- but the
+    // user still needs the sentence telling them what to do about it.
+    let d = Dir::new("openocd_no_binary");
+    let out = tock(
+        &d,
+        &[
+            "--board",
+            "nrf52840dk",
+            "--transport",
+            "openocd",
+            "--opt",
+            "command=/nonexistent/openocd",
+            "--opt",
+            "page_size=4096",
+            "list",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(5));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("cannot start `/nonexistent/openocd`"), "{err}");
+    assert!(err.contains("try: install openocd"), "{err}");
 }
