@@ -88,11 +88,28 @@ impl Connection for Broker {
 /// `tock broker`: serve on stdio, for a subcommand that was not launched by
 /// `tock` and so has no inherited connection.
 pub(crate) fn broker(g: &Global) -> Result<(), CliError> {
-    let mut broker = Broker::new(load_context(g)?, g.trace_protocol);
+    let mut broker = watched(
+        Broker::new(load_context(g)?, g.trace_protocol),
+        g.trace_protocol,
+    );
     tock_proto::serve(
         std::io::stdin().lock(),
         std::io::stdout().lock(),
         &mut broker,
     )
     .map_err(tock_client::proto)
+}
+
+/// Wrap a broker so `--trace-protocol` shows what the client asked, not only
+/// what we went on to ask the transport. Without this the interesting half of
+/// the conversation is invisible once clients are separate processes.
+pub(crate) fn watched(broker: Broker, trace: bool) -> Box<dyn Connection> {
+    if trace {
+        Box::new(device::Traced {
+            peer: "client",
+            inner: Box::new(broker),
+        })
+    } else {
+        Box::new(broker)
+    }
 }

@@ -112,7 +112,8 @@ pub(crate) fn external(g: &Global, args: Vec<String>) -> Result<(), CliError> {
         let reader = ours
             .try_clone()
             .map_err(|e| CliError::new(Code::Failed, format!("{exe}: {e}")))?;
-        let mut broker = Broker::new(context, g.trace_protocol);
+        let mut broker =
+            crate::broker::watched(Broker::new(context, g.trace_protocol), g.trace_protocol);
         let _ = tock_proto::serve(reader, ours, &mut broker);
     }
 

@@ -85,8 +85,19 @@ fn option_bases(ctx: &Context, cwd: &Path) -> BTreeMap<String, String> {
 }
 
 /// A [`Connection`] that logs every message to stderr (`--trace-protocol`)
-/// and forwards it. One trait for both ends is what makes this ordinary.
-struct Traced(Box<dyn Connection>);
+/// and forwards it.
+///
+/// One trait for both ends is what makes this ordinary -- and what lets the
+/// same decorator watch either conversation. Wrapping the transport shows
+/// what we ask a device; wrapping the broker shows what a subcommand asks
+/// us. `peer` says which, since with both on they interleave.
+///
+/// `->` is always the request and `<-` always the answer, whichever side of
+/// it we are.
+pub(crate) struct Traced {
+    pub(crate) peer: &'static str,
+    pub(crate) inner: Box<dyn Connection>,
+}
 
 impl Connection for Traced {
     fn call(
@@ -94,21 +105,22 @@ impl Connection for Traced {
         request: Request,
         payload: Vec<u8>,
     ) -> Result<(Response, Vec<u8>), ProtoError> {
+        let peer = self.peer;
         eprintln!(
-            "-> {} (+{} bytes)",
+            "{peer} -> {} (+{} bytes)",
             serde_json::to_string(&request).unwrap(),
             payload.len()
         );
-        let r = self.0.call(request, payload);
-        match &r {
-            Ok((resp, data)) => eprintln!(
-                "<- {} (+{} bytes)",
-                serde_json::to_string(resp).unwrap(),
+        let answer = self.inner.call(request, payload);
+        match &answer {
+            Ok((response, data)) => eprintln!(
+                "{peer} <- {} (+{} bytes)",
+                serde_json::to_string(response).unwrap(),
                 data.len()
             ),
-            Err(e) => eprintln!("<- error: {e}"),
+            Err(e) => eprintln!("{peer} <- error: {e}"),
         }
-        r
+        answer
     }
 }
 
@@ -189,7 +201,10 @@ pub fn open_connection(ctx: &Context, trace: bool) -> Result<Box<dyn Connection>
         child,
     };
     Ok(if trace {
-        Box::new(Traced(Box::new(spawned)))
+        Box::new(Traced {
+            peer: "transport",
+            inner: Box::new(spawned),
+        })
     } else {
         Box::new(spawned)
     })

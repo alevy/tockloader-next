@@ -227,6 +227,18 @@ pub trait Connection {
     ) -> Result<(Response, Vec<u8>), ProtoError>;
 }
 
+/// So a boxed connection is still a connection, and decorators can be
+/// stacked without each layer caring what it wraps.
+impl Connection for Box<dyn Connection> {
+    fn call(
+        &mut self,
+        request: Request,
+        payload: Vec<u8>,
+    ) -> Result<(Response, Vec<u8>), ProtoError> {
+        (**self).call(request, payload)
+    }
+}
+
 /// A failure of the connection itself, never of the operation -- an operation
 /// that failed is a [`Response::Error`], which is an `Ok`.
 ///
