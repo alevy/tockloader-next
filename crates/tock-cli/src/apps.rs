@@ -1,4 +1,7 @@
-//! The built-in clients: `list`, `install`, `uninstall`.
+//! The built-in clients: `install` and `uninstall`.
+//!
+//! `list` is no longer here: it is `tock-list`, reached the same way a
+//! third-party subcommand is. These two are next.
 //!
 //! Each one plans against a local image with [`tock_image`] and then drives a
 //! connection to make the device match. The loop that fetches bytes the
@@ -25,66 +28,6 @@ pub(crate) fn discover(
     let mut flash = Flash::new(&region);
     let found = session.with_reads(&mut flash, |f| tock_image::discover(&region, f))?;
     Ok((flash, found))
-}
-
-pub(crate) fn list(g: &Global) -> Result<(), CliError> {
-    let ctx = load_context(g)?;
-    let mut session = device::open(&ctx, g.trace_protocol)?;
-    if session.capabilities.contains(&Capability::Apps)
-        && !session.capabilities.contains(&Capability::MemoryRead)
-    {
-        return Err(CliError::new(
-            Code::Capability,
-            "app-level transports are not wired up in the spike yet",
-        ));
-    }
-    let (_, found) = discover(&ctx, &mut session)?;
-    let region = ctx.board.app_region();
-    let apps: Vec<_> = found
-        .apps()
-        .map(|(address, h)| {
-            json!({
-                "name": h.package_name().unwrap_or(""),
-                "address": address,
-                "size": h.total_size,
-                "version": h.app_version(),
-                "enabled": h.is_enabled(),
-                "sticky": h.is_sticky(),
-                "fixed_flash": h.fixed_addresses().1,
-                "checksum_ok": h.checksum_ok(),
-            })
-        })
-        .collect();
-    if g.format == Format::Json {
-        println!(
-            "{}",
-            json!({ "board": ctx.board.board.name, "apps": apps, "end": found.end(&region) })
-        );
-        return Ok(());
-    }
-    if apps.is_empty() {
-        println!("no apps installed");
-    }
-    for a in &apps {
-        let mut flags = vec![];
-        if !a["enabled"].as_bool().unwrap() {
-            flags.push("disabled");
-        }
-        if a["sticky"].as_bool().unwrap() {
-            flags.push("sticky");
-        }
-        if !a["checksum_ok"].as_bool().unwrap() {
-            flags.push("BAD CHECKSUM");
-        }
-        println!(
-            "{:<20} {:#010x}  {:>7} bytes  {}",
-            a["name"].as_str().unwrap(),
-            a["address"].as_u64().unwrap(),
-            a["size"].as_u64().unwrap(),
-            flags.join(", ")
-        );
-    }
-    Ok(())
 }
 
 pub(crate) fn request(change: &ChangeArgs) -> Request {

@@ -30,7 +30,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use serde_json::json;
 
-use apps::{install, list, uninstall};
+use apps::{install, uninstall};
 use broker::broker;
 use cli::{Cli, Command, ConfigCommand, Format};
 use config::config_show;
@@ -65,7 +65,10 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Config {
             command: ConfigCommand::Show,
         } => config_show(&g),
-        Command::List => list(&g),
+        // An alias, not an implementation: `tock-list` is the same binary a
+        // contributor would write, reached the same way.
+        Command::List => external(&g, vec!["list".into()]),
+        Command::Context => config::context(&g),
         Command::Install { tabs, change } => install(&g, tabs, change),
         Command::Uninstall { names, change } => uninstall(&g, names, change),
         Command::Broker => broker(&g),

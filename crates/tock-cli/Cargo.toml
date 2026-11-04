@@ -11,6 +11,10 @@ name = "tock"
 path = "src/main.rs"
 
 [[bin]]
+name = "tock-list"
+path = "clients/list.rs"
+
+[[bin]]
 name = "tock-transport-file"
 path = "transports/file.rs"
 

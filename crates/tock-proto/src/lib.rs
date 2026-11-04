@@ -178,7 +178,7 @@ pub struct FlashInfo {
     pub size: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     Unsupported,
@@ -247,6 +247,9 @@ pub enum ProtoError {
     /// The connection could not be established, or has failed for good.
     #[error("{message}")]
     Failed {
+        /// What sort of failure, so a caller can classify it the way it would
+        /// classify a [`Response::Error`].
+        kind: ErrorKind,
         message: String,
         /// What the user might do about it, in whole sentences. One per line.
         suggestion: Option<String>,
@@ -256,15 +259,33 @@ pub enum ProtoError {
 impl ProtoError {
     pub fn failed(message: impl Into<String>) -> ProtoError {
         ProtoError::Failed {
+            kind: ErrorKind::Device,
             message: message.into(),
             suggestion: None,
+        }
+    }
+
+    /// Classify it as something other than a device failure.
+    pub fn with_kind(self, kind: ErrorKind) -> ProtoError {
+        match self {
+            ProtoError::Failed {
+                message,
+                suggestion,
+                ..
+            } => ProtoError::Failed {
+                kind,
+                message,
+                suggestion,
+            },
+            other => other,
         }
     }
 
     /// Attach the line the CLI prints as `try: ...`.
     pub fn with_suggestion(self, hint: impl Into<String>) -> ProtoError {
         match self {
-            ProtoError::Failed { message, .. } => ProtoError::Failed {
+            ProtoError::Failed { kind, message, .. } => ProtoError::Failed {
+                kind,
                 message,
                 suggestion: Some(hint.into()),
             },
@@ -425,10 +446,11 @@ impl From<ProtoError> for Response {
     fn from(e: ProtoError) -> Response {
         match e {
             ProtoError::Failed {
+                kind,
                 message,
                 suggestion,
             } => Response::Error {
-                kind: ErrorKind::Device,
+                kind,
                 message,
                 suggestion,
             },

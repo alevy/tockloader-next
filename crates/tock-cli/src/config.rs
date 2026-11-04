@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tock_board::{Context, FileSource, Inputs, Layer, ProjectFile, UserConfig};
+use tock_board::{Context, FileSource, Inputs, Layer, ProjectFile, Resolved, UserConfig};
 
 use crate::cli::{Format, Global};
 use tock_client::{CliError, Code};
@@ -120,6 +120,16 @@ pub(crate) fn load_context(g: &Global) -> Result<Context, CliError> {
         user: user.as_ref().map(|(o, u)| (o.clone(), u)),
     };
     Ok(tock_board::resolve(&inputs, &Fs)?)
+}
+
+/// `tock context`: print what was resolved, as a subcommand receives it.
+///
+/// The counterpart to `tock broker`. A subcommand launched by `tock` reads
+/// this from `TOCK_CONTEXT`; one run by hand asks for it.
+pub(crate) fn context(g: &Global) -> Result<(), CliError> {
+    let resolved = Resolved::new(&load_context(g)?, project_apps()?);
+    println!("{}", serde_json::to_string(&resolved).unwrap());
+    Ok(())
 }
 
 pub(crate) fn config_show(g: &Global) -> Result<(), CliError> {

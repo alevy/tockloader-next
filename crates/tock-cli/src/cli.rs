@@ -49,6 +49,8 @@ pub(crate) enum Format {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Print the resolved board as a subcommand receives it, as JSON.
+    Context,
     /// List the apps on the board.
     List,
     /// Install apps (TAB files). With no TABs, installs the project's apps.

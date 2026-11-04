@@ -24,7 +24,7 @@ use std::process::{Child, Command, Stdio};
 
 use tock_board::Resolved;
 use tock_image::{Flash, NeedRead, WriteRun, coalesce};
-use tock_proto::{Capability, Connection, ProtoError, Request, Response, StreamChannel};
+use tock_proto::{Capability, Connection, ErrorKind, ProtoError, Request, Response, StreamChannel};
 
 pub use error::{CliError, Code};
 
@@ -255,14 +255,52 @@ impl<R: Read, W: Write> Drop for Brokered<R, W> {
 /// that does not need a board can ignore both.
 pub fn context() -> Result<Resolved, CliError> {
     if let Ok(why) = std::env::var("TOCK_CONTEXT_ERROR") {
-        return Err(CliError::new(Code::Config, why));
+        return Err(inherited_error(&why));
     }
-    let json = std::env::var("TOCK_CONTEXT").map_err(|_| {
-        CliError::new(Code::Config, "no resolved board: TOCK_CONTEXT is not set")
-            .hint("run this through `tock <name>` so it can resolve one")
-    })?;
+    let json = match std::env::var("TOCK_CONTEXT") {
+        Ok(json) => json,
+        // Nobody launched us: ask, the way `connect` starts `tock broker`.
+        Err(_) => {
+            let out = Command::new("tock").arg("context").output().map_err(|e| {
+                CliError::new(Code::Config, format!("cannot run `tock context`: {e}"))
+                    .hint("run this through `tock <name>`, or put `tock` on PATH")
+            })?;
+            if !out.status.success() {
+                return Err(CliError::new(
+                    Code::Config,
+                    String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                ));
+            }
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+    };
     serde_json::from_str(&json)
         .map_err(|e| CliError::new(Code::Config, format!("TOCK_CONTEXT is not readable: {e}")))
+}
+
+/// Rebuild the error `tock` could not resolve past, hints and all. Falls
+/// back to the raw text if it is not the document we expect, so a mangled
+/// variable still says something.
+fn inherited_error(raw: &str) -> CliError {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return CliError::new(Code::Config, raw.to_string());
+    };
+    let message = value["message"].as_str().unwrap_or(raw).to_string();
+    let mut error = CliError::new(Code::Config, message);
+    for hint in value["hints"].as_array().into_iter().flatten() {
+        if let Some(hint) = hint.as_str() {
+            error = error.hint(hint);
+        }
+    }
+    error
+}
+
+/// Whether `tock` was asked for machine-readable output.
+///
+/// A client parses its own arguments, but not the global flags: `tock` owns
+/// those and forwards what a subcommand must honour.
+pub fn json_output() -> bool {
+    std::env::var("TOCK_FORMAT").is_ok_and(|v| v == "json")
 }
 
 /// Reduce both kinds of failure to one error: a dead connection, and a
@@ -274,13 +312,13 @@ pub fn answered(
         Err(e) => Err(proto(e)),
         Ok((
             Response::Error {
+                kind,
                 message,
                 suggestion,
-                ..
             },
             _,
         )) => {
-            let mut error = CliError::new(Code::Device, message);
+            let mut error = CliError::new(code_for(kind), message);
             // A transport owns the whole sentence, and may offer more than
             // one remedy: one hint per line.
             for hint in suggestion.iter().flat_map(|s| s.lines()) {
@@ -292,8 +330,25 @@ pub fn answered(
     }
 }
 
+/// A protocol failure, classified the way the CLI classifies its own.
+///
+/// Without this a mistyped transport name exits 5 rather than 3, because
+/// everything that crosses a connection looks like a device problem from the
+/// far side.
+pub fn code_for(kind: ErrorKind) -> Code {
+    match kind {
+        ErrorKind::Selection => Code::Config,
+        ErrorKind::Unsupported => Code::Capability,
+        ErrorKind::Device | ErrorKind::InvalidRequest => Code::Device,
+    }
+}
+
 pub fn proto(e: ProtoError) -> CliError {
-    let mut error = CliError::new(Code::Device, e.to_string());
+    let code = match &e {
+        ProtoError::Failed { kind, .. } => code_for(*kind),
+        _ => Code::Device,
+    };
+    let mut error = CliError::new(code, e.to_string());
     if let ProtoError::Failed {
         suggestion: Some(hint),
         ..

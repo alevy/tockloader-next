@@ -11,7 +11,7 @@
 
 use tock_proto::{Connection, ProtoError, Request, Response};
 
-use tock_client::{CliError, Session};
+use tock_client::{CliError, Code, Session};
 
 use crate::cli::Global;
 use crate::config::load_context;
@@ -45,7 +45,12 @@ impl Broker {
 }
 
 fn fatal(e: CliError) -> ProtoError {
-    let error = ProtoError::failed(e.message);
+    let kind = match e.code {
+        Code::Config => tock_proto::ErrorKind::Selection,
+        Code::Capability => tock_proto::ErrorKind::Unsupported,
+        _ => tock_proto::ErrorKind::Device,
+    };
+    let error = ProtoError::failed(e.message).with_kind(kind);
     if e.hints.is_empty() {
         error
     } else {

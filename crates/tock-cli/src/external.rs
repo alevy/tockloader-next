@@ -57,12 +57,26 @@ pub(crate) fn external(g: &Global, args: Vec<String>) -> Result<(), CliError> {
             cmd.env("TOCK_CONTEXT", serde_json::to_string(&resolved).unwrap());
         }
         Err(e) => {
-            cmd.env("TOCK_CONTEXT_ERROR", e.message);
+            // The whole error, not just its message: a subcommand reporting
+            // "no board selected" without "try: tock --board ..." has lost
+            // the half that helps.
+            cmd.env(
+                "TOCK_CONTEXT_ERROR",
+                serde_json::json!({
+                    "code": e.code as u8,
+                    "message": e.message,
+                    "hints": e.hints,
+                })
+                .to_string(),
+            );
         }
     }
     // Forwarded for a subcommand that re-invokes `tock` for something other
     // than a device -- `tock config show`, say. Reaching the device does not
     // need them: that is what fd 3 is for.
+    if g.format == crate::cli::Format::Json {
+        cmd.env("TOCK_FORMAT", "json");
+    }
     for (name, v) in [
         ("TOCK_BOARD", &g.board),
         ("TOCK_TRANSPORT", &g.transport),
