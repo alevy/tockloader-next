@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use tock_board::Context;
-use tock_proto::{Client, Connection, FlashInfo, Request, Spawned, Traced};
+use tock_proto::{Client, Connection, FlashInfo, Request, Traced};
 
-use tock_client::{CliError, Code, proto};
+use tock_client::{CliError, Code, Spawned, proto};
 
 /// Open the transport named in the context. Every transport is an executable
 /// `tock-transport-<name>`, found next to `tock` or on `PATH` -- including the
