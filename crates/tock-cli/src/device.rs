@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use tock_board::Context;
-use tock_proto::{Connection, FlashInfo, Request, Spawned, Traced};
+use tock_proto::{Client, Connection, FlashInfo, Request, Spawned, Traced};
 
-use tock_client::{CliError, Code, Session};
+use tock_client::{CliError, Code, proto};
 
 /// Open the transport named in the context. Every transport is an executable
 /// `tock-transport-<name>`, found next to `tock` or on `PATH` -- including the
@@ -53,29 +53,32 @@ pub fn open_connection(ctx: &Context, trace: bool) -> Result<Box<dyn Connection>
 
 /// Spawn the transport the context names, greet it, and open it.
 ///
-/// The result is an ordinary [`Session`] -- the same thing a subcommand gets
+/// The result is an ordinary [`Client`] -- the same thing a subcommand gets
 /// from the connection it inherits. The difference is only that we started
 /// the transport and it did not.
-pub fn open(ctx: &Context, trace: bool) -> Result<Session, CliError> {
+pub fn open(ctx: &Context, trace: bool) -> Result<Client, CliError> {
     let connection = open_connection(ctx, trace)?;
     let layout = &ctx.board.layout;
     let flash = FlashInfo {
         start: layout.flash.start.0,
         size: layout.flash.size.0,
     };
-    let mut session = Session::open(connection)?;
+    let mut device =
+        Client::open(connection, concat!("tock ", env!("CARGO_PKG_VERSION"))).map_err(proto)?;
 
     let options = serde_json::to_value(ctx.transport_options()).unwrap();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    session.call(
-        Request::Open {
-            board: ctx.board.board.name.clone(),
-            arch: ctx.board.board.arch.clone(),
-            flash,
-            options: options.as_object().cloned().unwrap_or_default(),
-            option_bases: ctx.option_bases(&cwd),
-        },
-        vec![],
-    )?;
-    Ok(session)
+    device
+        .call(
+            Request::Open {
+                board: ctx.board.board.name.clone(),
+                arch: ctx.board.board.arch.clone(),
+                flash,
+                options: options.as_object().cloned().unwrap_or_default(),
+                option_bases: ctx.option_bases(&cwd),
+            },
+            vec![],
+        )
+        .map_err(proto)?;
+    Ok(device)
 }

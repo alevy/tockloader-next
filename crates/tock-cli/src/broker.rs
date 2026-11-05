@@ -9,9 +9,9 @@
 //! subcommand that never touches a device -- building a TAB, say -- does not
 //! spawn one, and does not fail on a machine with no board attached.
 
-use tock_proto::{Connection, ProtoError, Request, Response};
+use tock_proto::{Client, Connection, ProtoError, Request, Response};
 
-use tock_client::{CliError, Code, Session};
+use tock_client::{CliError, Code};
 
 use crate::cli::Global;
 use crate::config::load_context;
@@ -20,7 +20,7 @@ use crate::device;
 pub(crate) struct Broker {
     context: tock_board::Context,
     trace: bool,
-    device: Option<Session>,
+    device: Option<Client>,
 }
 
 impl Broker {
@@ -35,7 +35,7 @@ impl Broker {
     /// Open on demand. A failure to open is fatal to the connection -- there
     /// will never be a device -- so it travels as an error rather than a
     /// response, carrying whatever the CLI would have told the user.
-    fn device(&mut self) -> Result<&mut Session, ProtoError> {
+    fn device(&mut self) -> Result<&mut Client, ProtoError> {
         if self.device.is_none() {
             let opened = device::open(&self.context, self.trace).map_err(fatal)?;
             self.device = Some(opened);
@@ -80,7 +80,10 @@ impl Connection for Broker {
                 ))
             }
             Request::Open { .. } | Request::Close => Ok((Response::Ok, vec![])),
-            other => self.device()?.forward(other, payload),
+            // The raw connection, not `Client::call`: a relay must hand a
+            // refusal back as the refusal it is, rather than adopt it as its
+            // own failure and hang up.
+            other => self.device()?.connection.call(other, payload),
         }
     }
 }

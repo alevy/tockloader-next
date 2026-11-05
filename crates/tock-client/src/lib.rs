@@ -23,146 +23,9 @@ use std::process::{Command, Stdio};
 
 use tock_board::Resolved;
 
-use tock_image::WriteRun;
-use tock_proto::{
-    Capability, Connection, ErrorKind, ProtoError, Request as Rq, Response, Spawned, StreamChannel,
-};
+use tock_proto::{Client, Connection, ErrorKind, ProtoError, Spawned, StreamChannel};
 
 pub use error::{CliError, Code};
-
-/// The device `tock` opened for us.
-///
-/// Obtained from [`connect`]. The transport was already opened with the
-/// resolved context before this process started, so there is no `Open` here
-/// and no options to supply -- just the capabilities it turned out to have.
-pub struct Session {
-    connection: Box<dyn Connection>,
-    pub transport: String,
-    pub capabilities: Vec<Capability>,
-}
-
-impl Session {
-    /// Greet whatever is on the other end and learn what it can do.
-    pub fn open(mut connection: Box<dyn Connection>) -> Result<Session, CliError> {
-        let hello = Rq::Hello {
-            protocol: tock_proto::PROTOCOL_VERSION,
-            client: format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
-        };
-        match answered(connection.call(hello, vec![]))? {
-            (
-                Response::Hello {
-                    protocol,
-                    transport,
-                    capabilities,
-                    ..
-                },
-                _,
-            ) => {
-                if protocol != tock_proto::PROTOCOL_VERSION {
-                    return Err(CliError::new(
-                        Code::Device,
-                        format!(
-                            "`{transport}` speaks protocol {protocol}, this tool speaks {}",
-                            tock_proto::PROTOCOL_VERSION
-                        ),
-                    ));
-                }
-                Ok(Session {
-                    connection,
-                    transport,
-                    capabilities,
-                })
-            }
-            (other, _) => Err(proto(ProtoError::Unexpected(Box::new(other)))),
-        }
-    }
-
-    /// Fail clearly if the device cannot do what this command needs.
-    pub fn require(&self, capability: Capability, doing: &str) -> Result<(), CliError> {
-        if self.capabilities.contains(&capability) {
-            return Ok(());
-        }
-        Err(CliError::new(
-            Code::Capability,
-            format!(
-                "`{doing}` needs the `{}` capability, which transport `{}` does not have",
-                serde_json::to_value(&capability)
-                    .ok()
-                    .and_then(|v| v.as_str().map(str::to_string))
-                    .unwrap_or_default(),
-                self.transport
-            ),
-        )
-        .hint("pick a transport that has it with --transport <name>"))
-    }
-
-    /// Read byte ranges, one request each.
-    ///
-    /// Merging nearby ranges is the caller's: it is a performance choice
-    /// that depends on the workload, and a client that issues one read per
-    /// range is slow, not wrong.
-    pub fn read_ranges(&mut self, ranges: &[(u64, u64)]) -> Result<Vec<(u64, Vec<u8>)>, CliError> {
-        let mut out = Vec::new();
-        for &(address, len) in ranges {
-            let (_, data) = answered(self.connection.call(Rq::Read { address, len }, vec![]))?;
-            // A short reply would leave a read loop asking for the same bytes
-            // forever. Say so instead of hanging.
-            if data.len() as u64 != len {
-                return Err(CliError::new(
-                    Code::Device,
-                    format!(
-                        "transport `{}` returned {} of the {len} bytes asked for at {address:#x}",
-                        self.transport,
-                        data.len()
-                    ),
-                ));
-            }
-            out.push((address, data));
-        }
-        Ok(out)
-    }
-
-    /// Write byte runs as they stand. `render` has already merged them, and
-    /// erase granularity is the transport's business.
-    pub fn write_runs(&mut self, runs: &[WriteRun]) -> Result<(), CliError> {
-        for run in runs {
-            answered(self.connection.call(
-                Rq::Write {
-                    address: run.address,
-                },
-                run.data.clone(),
-            ))?;
-        }
-        Ok(())
-    }
-
-    /// Pass a request through untouched, including a response that says the
-    /// operation failed.
-    ///
-    /// For relaying on someone else's behalf. A refusal is theirs to see and
-    /// decide about, not ours to turn into our own failure -- which is what
-    /// [`Session::call`] would do.
-    pub fn forward(
-        &mut self,
-        request: Rq,
-        payload: Vec<u8>,
-    ) -> Result<(Response, Vec<u8>), ProtoError> {
-        self.connection.call(request, payload)
-    }
-
-    /// Send a request and treat a refusal as this command's failure.
-    pub fn call(&mut self, request: Rq, payload: Vec<u8>) -> Result<(Response, Vec<u8>), CliError> {
-        answered(self.connection.call(request, payload))
-    }
-}
-
-impl Drop for Session {
-    /// Say goodbye, so the far end can stop for a stated reason rather than
-    /// by noticing a closed pipe.
-    fn drop(&mut self) {
-        let _ = self.connection.call(Rq::Close, vec![]);
-    }
-}
 
 /// The connection `tock` handed us, or one we start for ourselves.
 ///
@@ -170,7 +33,22 @@ impl Drop for Session {
 /// case and means `tock` owns the device. Without it -- running a subcommand
 /// by hand, say -- this starts `tock broker`, which resolves the environment
 /// and opens a transport the same way.
-pub fn connect() -> Result<Box<dyn Connection>, CliError> {
+pub fn connect() -> Result<Client, CliError> {
+    Client::open(raw_connection()?, &whoami()).map_err(proto)
+}
+
+/// How we introduce ourselves in `Hello`: the program running, since that is
+/// what a trace of the conversation needs to name.
+fn whoami() -> String {
+    let name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "a tock subcommand".into());
+    format!("{name} {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// The carrier itself, for the rare caller that wants it unopened.
+fn raw_connection() -> Result<Box<dyn Connection>, CliError> {
     if let Some(fd) = std::env::var("TOCK_CONNECTION")
         .ok()
         .and_then(|v| v.parse::<i32>().ok())
@@ -284,33 +162,6 @@ pub fn json_output() -> bool {
     std::env::var("TOCK_FORMAT").is_ok_and(|v| v == "json")
 }
 
-/// Reduce both kinds of failure to one error: a dead connection, and a
-/// response saying the operation failed. Only this needs to tell them apart.
-pub fn answered(
-    result: Result<(Response, Vec<u8>), ProtoError>,
-) -> Result<(Response, Vec<u8>), CliError> {
-    match result {
-        Err(e) => Err(proto(e)),
-        Ok((
-            Response::Error {
-                kind,
-                message,
-                suggestion,
-            },
-            _,
-        )) => {
-            let mut error = CliError::new(code_for(kind), message);
-            // A transport owns the whole sentence, and may offer more than
-            // one remedy: one hint per line.
-            for hint in suggestion.iter().flat_map(|s| s.lines()) {
-                error = error.hint(hint);
-            }
-            Err(error)
-        }
-        ok => ok.map_err(proto),
-    }
-}
-
 /// A protocol failure, classified the way the CLI classifies its own.
 ///
 /// Without this a mistyped transport name exits 5 rather than 3, because
@@ -340,33 +191,4 @@ pub fn proto(e: ProtoError) -> CliError {
         }
     }
     error
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Answers every read with fewer bytes than asked for.
-    struct Stingy;
-    impl Connection for Stingy {
-        fn call(
-            &mut self,
-            _request: Rq,
-            _payload: Vec<u8>,
-        ) -> Result<(Response, Vec<u8>), ProtoError> {
-            Ok((Response::Data, vec![0xFF; 4]))
-        }
-    }
-
-    #[test]
-    fn a_short_read_is_an_error_not_a_silent_retry() {
-        let mut session = Session {
-            connection: Box::new(Stingy),
-            transport: "stingy".into(),
-            capabilities: vec![Capability::MemoryRead],
-        };
-        // `with_reads` would ask again forever if this came back Ok.
-        let err = session.read_ranges(&[(0x1000, 64)]).unwrap_err();
-        assert!(format!("{err:?}").contains('4'), "{err:?}");
-    }
 }

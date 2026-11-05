@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use tock_board::Resolved;
-use tock_client::{CliError, Code, Session, connect, context, finish};
+use tock_client::{CliError, Code, connect, context, finish};
 use tock_image::{NewApp, Request};
 
 #[path = "apps.rs"]
@@ -61,8 +61,8 @@ fn run(args: &Args) -> Result<(), CliError> {
         ..Default::default()
     };
 
-    let mut session = Session::open(connect()?)?;
-    apps::apply(&mut session, &board, &request, args.dry_run)?.report(args.dry_run);
+    let mut device = connect()?;
+    apps::apply(&mut device, &board, &request, args.dry_run)?.report(args.dry_run);
     Ok(())
 }
 

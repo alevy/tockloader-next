@@ -7,7 +7,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use tock_client::{CliError, Session, connect, context, finish};
+use tock_client::{CliError, connect, context, finish};
 
 #[path = "apps.rs"]
 mod apps;
@@ -28,8 +28,8 @@ fn main() -> ExitCode {
 
 fn run(json: bool) -> Result<(), CliError> {
     let board = context()?;
-    let mut session = Session::open(connect()?)?;
-    let (_, found) = apps::discover(&mut session, &board)?;
+    let mut device = connect()?;
+    let (_, found) = apps::discover(&mut device, &board)?;
 
     let apps: Vec<_> = found
         .apps()

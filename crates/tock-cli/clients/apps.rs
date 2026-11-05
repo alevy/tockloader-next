@@ -14,9 +14,9 @@
 #![allow(dead_code)]
 
 use tock_board::Resolved;
-use tock_client::{CliError, Code, Session};
+use tock_client::{CliError, Code, proto};
 use tock_image::{Discovered, Flash, NeedRead, Plan, PlanError, Request, WriteRun};
-use tock_proto::Capability;
+use tock_proto::{Capability, Client, Request as Rq};
 
 /// How far apart two reads may be before issuing them separately beats
 /// reading the bytes between them.
@@ -40,7 +40,7 @@ pub const WRITE_GAP: u64 = 4095;
 /// have, it says so rather than reading. This is the loop that answers, and
 /// the one place reads are merged before they are issued.
 pub fn with_reads<T>(
-    session: &mut Session,
+    device: &mut Client,
     flash: &mut Flash,
     mut step: impl FnMut(&Flash) -> Result<T, NeedRead>,
 ) -> Result<T, CliError> {
@@ -48,9 +48,8 @@ pub fn with_reads<T>(
         match step(flash) {
             Ok(value) => return Ok(value),
             Err(NeedRead { ranges }) => {
-                for (address, data) in
-                    session.read_ranges(&tock_image::coalesce(&ranges, READ_GAP))?
-                {
+                let merged = tock_image::coalesce(&ranges, READ_GAP);
+                for (address, data) in device.read_ranges(&merged).map_err(proto)? {
                     flash.insert(address, &data);
                 }
             }
@@ -59,12 +58,12 @@ pub fn with_reads<T>(
 }
 
 /// Walk the app list on the device.
-pub fn discover(session: &mut Session, board: &Resolved) -> Result<(Flash, Discovered), CliError> {
-    session.require(Capability::MemoryRead, "reading apps")?;
+pub fn discover(device: &mut Client, board: &Resolved) -> Result<(Flash, Discovered), CliError> {
+    device
+        .require(Capability::MemoryRead, "reading apps")
+        .map_err(proto)?;
     let mut flash = Flash::new(&board.apps);
-    let found = with_reads(session, &mut flash, |f| {
-        tock_image::discover(&board.apps, f)
-    })?;
+    let found = with_reads(device, &mut flash, |f| tock_image::discover(&board.apps, f))?;
     Ok((flash, found))
 }
 
@@ -75,36 +74,56 @@ pub fn discover(session: &mut Session, board: &Resolved) -> Result<(Flash, Disco
 /// everything from here is the same work, and sharing it is what keeps two
 /// separate binaries behaving like one tool.
 pub fn apply(
-    session: &mut Session,
+    device: &mut Client,
     board: &Resolved,
     request: &Request,
     dry_run: bool,
 ) -> Result<Applied, CliError> {
     if !dry_run {
-        session.require(Capability::MemoryWrite, "changing apps")?;
+        device
+            .require(Capability::MemoryWrite, "changing apps")
+            .map_err(proto)?;
     }
-    let (mut flash, found) = discover(session, board)?;
+    let (mut flash, found) = discover(device, board)?;
     let app_ram = board.app_ram.map(|r| (r.start, r.size));
     let plan = tock_image::plan(&board.apps, &board.placement, app_ram, &found, request)
         .map_err(plan_error)?;
-    let writes = with_reads(session, &mut flash, |f| {
+    let writes = with_reads(device, &mut flash, |f| {
         tock_image::render(&board.apps, &plan, f, WRITE_GAP)
     })?;
     if !dry_run {
-        session.write_runs(&writes)?;
-        verify(session, &writes)?;
+        write_runs(device, &writes)?;
+        verify(device, &writes)?;
     }
     Ok(Applied { plan, writes })
 }
 
+/// Send each changed run. A loop, not a discipline -- which is why it is
+/// here and not on [`Client`]: `render` already merged these, and erase
+/// granularity is the transport's business.
+fn write_runs(device: &mut Client, runs: &[WriteRun]) -> Result<(), CliError> {
+    for run in runs {
+        device
+            .call(
+                Rq::Write {
+                    address: run.address,
+                },
+                run.data.clone(),
+            )
+            .map_err(proto)?;
+    }
+    Ok(())
+}
+
 /// Read back what was written and compare. Reads coalesce, so one reply can
 /// cover several runs: find the one containing each.
-fn verify(session: &mut Session, writes: &[WriteRun]) -> Result<(), CliError> {
+fn verify(device: &mut Client, writes: &[WriteRun]) -> Result<(), CliError> {
     let ranges: Vec<(u64, u64)> = writes
         .iter()
         .map(|w| (w.address, w.data.len() as u64))
         .collect();
-    let read_back = session.read_ranges(&tock_image::coalesce(&ranges, READ_GAP))?;
+    let merged = tock_image::coalesce(&ranges, READ_GAP);
+    let read_back = device.read_ranges(&merged).map_err(proto)?;
     for run in writes {
         let end = run.address + run.data.len() as u64;
         let got = read_back

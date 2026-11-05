@@ -430,6 +430,151 @@ impl Connection for Traced {
     }
 }
 
+/// The requesting end of a connection, with the rules it owes the other.
+///
+/// [`serve`] is the responding end's loop; this is its opposite number. Greet
+/// before anything else, refuse to proceed on a version mismatch, read the
+/// capabilities off the reply and check them before asking -- all of that is
+/// the protocol, not a style, and a client in another language has to do the
+/// same. [`Options`] is already here for the same reason on the other side.
+///
+/// Errors here are [`ProtoError`]. A caller that reports to a user maps them
+/// to whatever vocabulary it has; `tock-client` turns them into exit codes.
+pub struct Client {
+    /// For a relay, which wants [`Connection::call`] and its two kinds of
+    /// failure kept apart. Everything else should use [`Client::call`].
+    pub connection: Box<dyn Connection>,
+    pub transport: String,
+    pub capabilities: Vec<Capability>,
+}
+
+impl Client {
+    /// Greet whatever is on the other end and learn what it can do.
+    ///
+    /// `client` is who is talking, for the far end's logs -- the program,
+    /// not this crate, which is why it is asked for rather than assumed.
+    pub fn open(mut connection: Box<dyn Connection>, client: &str) -> Result<Client, ProtoError> {
+        let hello = Request::Hello {
+            protocol: PROTOCOL_VERSION,
+            client: client.to_string(),
+        };
+        match collapse(connection.call(hello, vec![]))? {
+            (
+                Response::Hello {
+                    protocol,
+                    transport,
+                    capabilities,
+                    ..
+                },
+                _,
+            ) => {
+                if protocol != PROTOCOL_VERSION {
+                    return Err(ProtoError::failed(format!(
+                        "`{transport}` speaks protocol {protocol}, this tool speaks {PROTOCOL_VERSION}"
+                    ))
+                    .with_kind(ErrorKind::Device));
+                }
+                Ok(Client {
+                    connection,
+                    transport,
+                    capabilities,
+                })
+            }
+            (other, _) => Err(ProtoError::Unexpected(Box::new(other))),
+        }
+    }
+
+    /// Send a request and treat a refusal as this command's failure.
+    ///
+    /// The distinction [`Connection`] keeps is spent here, deliberately: a
+    /// caller asking for bytes has no use for it. A **relay** must not do
+    /// this -- a refusal is its peer's to see -- which is what
+    /// [`Client::connection`] is for.
+    pub fn call(
+        &mut self,
+        request: Request,
+        payload: Vec<u8>,
+    ) -> Result<(Response, Vec<u8>), ProtoError> {
+        collapse(self.connection.call(request, payload))
+    }
+
+    /// Fail clearly if the device cannot do what this command needs.
+    pub fn require(&self, capability: Capability, doing: &str) -> Result<(), ProtoError> {
+        if self.capabilities.contains(&capability) {
+            return Ok(());
+        }
+        let name = serde_json::to_value(&capability)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        Err(ProtoError::failed(format!(
+            "`{doing}` needs the `{name}` capability, which transport `{}` does not have",
+            self.transport
+        ))
+        .with_kind(ErrorKind::Unsupported)
+        .with_suggestion("pick a transport that has it with --transport <name>"))
+    }
+
+    /// Read byte ranges, one request each, and insist on being answered in
+    /// full.
+    ///
+    /// The short-read check is the point: a caller looping until it has the
+    /// bytes it asked for would otherwise ask for the same ones forever.
+    /// Merging nearby ranges is *not* here -- that is a workload decision,
+    /// and a client that issues one read per range is slow, not wrong.
+    pub fn read_ranges(
+        &mut self,
+        ranges: &[(u64, u64)],
+    ) -> Result<Vec<(u64, Vec<u8>)>, ProtoError> {
+        let mut out = Vec::new();
+        for &(address, len) in ranges {
+            let (_, data) = self.call(Request::Read { address, len }, vec![])?;
+            if data.len() as u64 != len {
+                return Err(ProtoError::failed(format!(
+                    "transport `{}` returned {} of the {len} bytes asked for at {address:#x}",
+                    self.transport,
+                    data.len()
+                ))
+                .with_kind(ErrorKind::Device));
+            }
+            out.push((address, data));
+        }
+        Ok(out)
+    }
+}
+
+impl Drop for Client {
+    /// Say goodbye, so the far end stops for a stated reason rather than by
+    /// noticing a closed pipe. [`Spawned`] handles the case where we cannot.
+    fn drop(&mut self) {
+        let _ = self.connection.call(Request::Close, vec![]);
+    }
+}
+
+/// Turn "the operation failed" into "this failed", for a caller that has no
+/// use for the difference.
+fn collapse(
+    result: Result<(Response, Vec<u8>), ProtoError>,
+) -> Result<(Response, Vec<u8>), ProtoError> {
+    match result? {
+        (
+            Response::Error {
+                kind,
+                message,
+                suggestion,
+            },
+            _,
+        ) => {
+            let error = ProtoError::failed(message).with_kind(kind);
+            Err(match suggestion {
+                Some(hint) => error.with_suggestion(hint),
+                None => error,
+            })
+        }
+        ok => Ok(ok),
+    }
+}
+
 /// Put a [`Connection`] behind a byte stream: read requests, answer them,
 /// until `Close` or end of stream. The inverse of [`StreamChannel`], and what
 /// every `tock-transport-*` executable runs in `main`.
@@ -747,5 +892,31 @@ mod tests {
             waited.recv_timeout(Duration::from_secs(10)).is_ok(),
             "dropping a Spawned did not return: the child never saw end of stream"
         );
+    }
+
+    /// Answers every read with fewer bytes than asked for.
+    struct Stingy;
+    impl Connection for Stingy {
+        fn call(
+            &mut self,
+            _request: Request,
+            _payload: Vec<u8>,
+        ) -> Result<(Response, Vec<u8>), ProtoError> {
+            Ok((Response::Data, vec![0xFF; 4]))
+        }
+    }
+
+    /// A caller loops until it has what it asked for, so a short reply that
+    /// came back `Ok` would have it ask for the same bytes forever. Saying so
+    /// is the whole reason `read_ranges` exists rather than a bare `call`.
+    #[test]
+    fn a_short_read_is_an_error_not_a_silent_retry() {
+        let mut client = Client {
+            connection: Box::new(Stingy),
+            transport: "stingy".into(),
+            capabilities: vec![Capability::MemoryRead],
+        };
+        let err = client.read_ranges(&[(0x1000, 64)]).unwrap_err();
+        assert!(format!("{err}").contains('4'), "{err}");
     }
 }

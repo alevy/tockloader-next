@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use tock_client::{CliError, Session, connect, context, finish};
+use tock_client::{CliError, connect, context, finish};
 use tock_image::Request;
 
 #[path = "apps.rs"]
@@ -38,7 +38,7 @@ fn run(args: &Args) -> Result<(), CliError> {
         include_sticky: args.include_sticky,
         ..Default::default()
     };
-    let mut session = Session::open(connect()?)?;
-    apps::apply(&mut session, &board, &request, args.dry_run)?.report(args.dry_run);
+    let mut device = connect()?;
+    apps::apply(&mut device, &board, &request, args.dry_run)?.report(args.dry_run);
     Ok(())
 }
