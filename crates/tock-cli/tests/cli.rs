@@ -863,3 +863,26 @@ fn a_subcommand_owns_its_own_arguments() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `--format json` has to reach the error path too, and it has to reach it
+/// the same way whether `tock` answers the command or a subcommand does.
+/// The two used to be separate code: `tock` read its own flag, a subcommand
+/// read `TOCK_FORMAT`, and a subcommand's failures came out as prose.
+#[test]
+fn an_error_is_json_whoever_produced_it() {
+    let d = Dir::new("json_errors");
+    // `context` is ours; `list` is tock-list, reached through the handoff.
+    for command in [
+        vec!["--format", "json", "context"],
+        vec!["--format", "json", "list"],
+    ] {
+        let out = tock(&d, &command);
+        assert!(!out.status.success());
+        let text = String::from_utf8(out.stdout).unwrap();
+        let value: Value = serde_json::from_str(text.trim())
+            .unwrap_or_else(|e| panic!("{command:?} printed {text:?}: {e}"));
+        assert_eq!(value["code"], 3, "{command:?}");
+        assert_eq!(value["error"], "no board selected", "{command:?}");
+        assert!(value["hints"].as_array().is_some_and(|h| !h.is_empty()));
+    }
+}

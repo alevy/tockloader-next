@@ -3,8 +3,11 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use tock_client::{CliError, Session, connect, context};
+use tock_client::{CliError, Session, connect, context, finish};
 use tock_image::Request;
+
+#[path = "apps.rs"]
+mod apps;
 
 #[derive(Parser)]
 #[command(name = "tock-uninstall", about = "Remove apps from the board")]
@@ -24,17 +27,7 @@ struct Args {
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
-    match run(&args) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {}", e.message);
-            for hint in &e.hints {
-                eprintln!("  try: {hint}");
-            }
-            ExitCode::from(e.code as u8)
-        }
-    }
+    finish(run(&Args::parse()))
 }
 
 fn run(args: &Args) -> Result<(), CliError> {
@@ -46,8 +39,6 @@ fn run(args: &Args) -> Result<(), CliError> {
         ..Default::default()
     };
     let mut session = Session::open(connect()?)?;
-    session
-        .apply(&board, &request, args.dry_run)?
-        .report(args.dry_run);
+    apps::apply(&mut session, &board, &request, args.dry_run)?.report(args.dry_run);
     Ok(())
 }

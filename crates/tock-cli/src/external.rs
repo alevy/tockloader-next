@@ -106,12 +106,10 @@ pub(crate) fn external(g: &Global, args: Vec<String>) -> Result<(), CliError> {
             );
         }
     }
-    // Forwarded for a subcommand that re-invokes `tock` for something other
-    // than a device -- `tock config show`, say. Reaching the device does not
-    // need them: that is what fd 3 is for.
-    if g.format == crate::cli::Format::Json {
-        cmd.env("TOCK_FORMAT", "json");
-    }
+    // `TOCK_FORMAT` is not here: it is set on our own environment in `main`,
+    // so the child inherits it. These are forwarded for a subcommand that
+    // re-invokes `tock` for something other than a device -- `tock config
+    // show`, say. Reaching the device does not need them: fd 3 is for that.
     for (name, v) in [
         ("TOCK_BOARD", &g.board),
         ("TOCK_TRANSPORT", &g.transport),

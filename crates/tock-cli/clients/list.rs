@@ -7,9 +7,10 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use tock_client::{CliError, Session, connect, context};
-use tock_image::Flash;
-use tock_proto::Capability;
+use tock_client::{CliError, Session, connect, context, finish};
+
+#[path = "apps.rs"]
+mod apps;
 
 /// `tock list` takes nothing, but it still parses: a subcommand owns its
 /// own arguments, so `--help` has to reach us rather than be answered by
@@ -22,25 +23,13 @@ fn main() -> ExitCode {
     Args::parse();
     // `--format` belongs to `tock`, which forwards what a client must
     // honour. A subcommand parses its own arguments and not the global ones.
-    match run(tock_client::json_output()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {}", e.message);
-            for hint in &e.hints {
-                eprintln!("  try: {hint}");
-            }
-            ExitCode::from(e.code as u8)
-        }
-    }
+    finish(run(tock_client::json_output()))
 }
 
 fn run(json: bool) -> Result<(), CliError> {
     let board = context()?;
     let mut session = Session::open(connect()?)?;
-    session.require(Capability::MemoryRead, "reading apps")?;
-
-    let mut flash = Flash::new(&board.apps);
-    let found = session.with_reads(&mut flash, |f| tock_image::discover(&board.apps, f))?;
+    let (_, found) = apps::discover(&mut session, &board)?;
 
     let apps: Vec<_> = found
         .apps()

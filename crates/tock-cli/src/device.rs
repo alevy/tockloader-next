@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use tock_board::Context;
-use tock_proto::{Connection, FlashInfo, Request, Spawned, StreamChannel, Traced};
+use tock_proto::{Connection, FlashInfo, Request, Spawned, Traced};
 
 use tock_client::{CliError, Code, Session};
 
@@ -38,13 +38,9 @@ pub fn open_connection(ctx: &Context, trace: bool) -> Result<Box<dyn Connection>
                 format!("cannot start {}: {e}", path.display()),
             )
         })?;
-    let spawned = Spawned {
-        channel: StreamChannel {
-            reader: child.stdout.take().expect("piped"),
-            writer: child.stdin.take().expect("piped"),
-        },
-        child,
-    };
+    let reader = child.stdout.take().expect("piped");
+    let writer = child.stdin.take().expect("piped");
+    let spawned = Spawned::new(reader, writer, child);
     Ok(if trace {
         Box::new(Traced {
             peer: "transport",

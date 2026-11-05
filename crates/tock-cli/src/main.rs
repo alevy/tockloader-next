@@ -25,8 +25,6 @@ mod external;
 
 use std::process::ExitCode;
 
-use serde_json::json;
-
 use broker::broker;
 use cli::{Command, ConfigCommand, Format, Global};
 use config::config_show;
@@ -37,24 +35,16 @@ fn main() -> ExitCode {
     // The parser is built at runtime because which commands exist is a fact
     // about this machine, not about what we shipped.
     let (global, command) = cli::parse(&external::installed());
-    let format = global.format;
-    match run(global, command) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            if format == Format::Json {
-                println!(
-                    "{}",
-                    json!({ "error": e.message, "hints": e.hints, "code": e.code as u8 })
-                );
-            } else {
-                eprintln!("error: {}", e.message);
-                for h in &e.hints {
-                    eprintln!("  try: {h}");
-                }
-            }
-            ExitCode::from(e.code as u8)
-        }
+    // `--format` is one way to set `TOCK_FORMAT`, which is the actual
+    // contract: it is what a subcommand reads, and what we read ourselves a
+    // line later. Normalising it here means one notion of format in the
+    // process, and children inherit it without being told.
+    if global.format == Format::Json {
+        unsafe { std::env::set_var("TOCK_FORMAT", "json") };
     }
+    // The same reporting every subcommand uses: `tock` is not a special case
+    // of its own contract.
+    tock_client::finish(run(global, command))
 }
 
 fn run(g: Global, command: Command) -> Result<(), CliError> {

@@ -350,8 +350,18 @@ impl<R: Read, W: Write> Connection for StreamChannel<R, W> {
 /// `tock-transport-<name>`, and a subcommand run on its own spawns
 /// `tock broker`. Neither cares which, which is the point of the trait.
 pub struct Spawned<R: Read, W: Write> {
-    pub channel: StreamChannel<R, W>,
-    pub child: std::process::Child,
+    /// An `Option` only so [`Drop`] can close it before waiting.
+    channel: Option<StreamChannel<R, W>>,
+    child: std::process::Child,
+}
+
+impl<R: Read, W: Write> Spawned<R, W> {
+    pub fn new(reader: R, writer: W, child: std::process::Child) -> Spawned<R, W> {
+        Spawned {
+            channel: Some(StreamChannel { reader, writer }),
+            child,
+        }
+    }
 }
 
 impl<R: Read, W: Write> Connection for Spawned<R, W> {
@@ -360,12 +370,23 @@ impl<R: Read, W: Write> Connection for Spawned<R, W> {
         request: Request,
         payload: Vec<u8>,
     ) -> Result<(Response, Vec<u8>), ProtoError> {
-        self.channel.call(request, payload)
+        match &mut self.channel {
+            Some(channel) => channel.call(request, payload),
+            None => Err(ProtoError::Closed),
+        }
     }
 }
 
 impl<R: Read, W: Write> Drop for Spawned<R, W> {
+    /// Close our end, *then* reap.
+    ///
+    /// [`serve`] ends on `Close` or on end of stream, and only the second is
+    /// ours to guarantee: waiting while still holding the pipe open means
+    /// the child is waiting for a request that will never come, and we are
+    /// waiting for it to exit. A missing `Close` should cost a round trip,
+    /// not the whole process.
     fn drop(&mut self) {
+        self.channel = None;
         let _ = self.child.wait();
     }
 }
@@ -691,5 +712,40 @@ mod tests {
             Request::Open { option_bases, .. } => assert!(option_bases.is_empty()),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A `Spawned` dropped without a `Close` having been sent must still
+    /// exit. It is the pipe, not the message, that has to end the child --
+    /// `serve` stops on either, and only end of stream is ours to
+    /// guarantee. Waiting while still holding the pipe open is a deadlock:
+    /// the child waits for a request, we wait for the child.
+    ///
+    /// `cat` stands in for a peer that reads until end of stream. This test
+    /// hangs rather than fails if the ordering is wrong, which is why it has
+    /// its own clock.
+    #[test]
+    fn dropping_a_spawned_connection_does_not_hang() {
+        use std::process::{Command, Stdio};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("cat");
+        let reader = child.stdout.take().unwrap();
+        let writer = child.stdin.take().unwrap();
+        let spawned = Spawned::new(reader, writer, child);
+
+        let (done, waited) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(spawned);
+            let _ = done.send(());
+        });
+        assert!(
+            waited.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "dropping a Spawned did not return: the child never saw end of stream"
+        );
     }
 }

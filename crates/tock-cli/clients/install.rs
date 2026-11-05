@@ -3,12 +3,16 @@
 //! With no arguments it installs what the project declares, which `tock`
 //! already resolved to absolute paths before this ran.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use tock_client::{CliError, Code, Session, connect, context, load_tab};
-use tock_image::Request;
+use tock_board::Resolved;
+use tock_client::{CliError, Code, Session, connect, context, finish};
+use tock_image::{NewApp, Request};
+
+#[path = "apps.rs"]
+mod apps;
 
 #[derive(Parser)]
 #[command(name = "tock-install", about = "Install apps on the board")]
@@ -27,17 +31,7 @@ struct Args {
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
-    match run(&args) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {}", e.message);
-            for hint in &e.hints {
-                eprintln!("  try: {hint}");
-            }
-            ExitCode::from(e.code as u8)
-        }
-    }
+    finish(run(&Args::parse()))
 }
 
 fn run(args: &Args) -> Result<(), CliError> {
@@ -68,8 +62,48 @@ fn run(args: &Args) -> Result<(), CliError> {
     };
 
     let mut session = Session::open(connect()?)?;
-    session
-        .apply(&board, &request, args.dry_run)?
-        .report(args.dry_run);
+    apps::apply(&mut session, &board, &request, args.dry_run)?.report(args.dry_run);
     Ok(())
+}
+
+/// A TAB, with the builds that suit this board picked out.
+///
+/// Here rather than in the shared module because `install` is the only
+/// command that reads one: `uninstall` takes names and `list` takes nothing.
+fn load_tab(board: &Resolved, path: &Path) -> Result<NewApp, CliError> {
+    let shown = path.display();
+    let bytes =
+        std::fs::read(path).map_err(|e| CliError::new(Code::Failed, format!("{shown}: {e}")))?;
+    let tab = tbf::Tab::parse(&bytes)
+        .map_err(|e| CliError::new(Code::Failed, format!("{shown}: {e}")))?;
+    if let Some(only) = tab.only_for_boards() {
+        if !only.contains(&board.board) {
+            return Err(CliError::new(
+                Code::Failed,
+                format!("{shown} is only for boards: {}", only.join(", ")),
+            ));
+        }
+    }
+    let tbfs = tab
+        .tbfs_for_arch(&board.arch)
+        .map_err(|e| CliError::new(Code::Failed, format!("{shown}: {e}")))?;
+    if tbfs.is_empty() {
+        return Err(CliError::new(
+            Code::Failed,
+            format!(
+                "{shown} has no build for `{}` (it has: {})",
+                board.arch,
+                tab.architectures().join(", ")
+            ),
+        ));
+    }
+    let name = tab
+        .name()
+        .map(str::to_string)
+        .or_else(|| tbfs[0].tbf.header.package_name().map(str::to_string))
+        .unwrap_or_else(|| shown.to_string());
+    Ok(NewApp {
+        name,
+        candidates: tbfs.into_iter().map(|t| t.tbf).collect(),
+    })
 }
