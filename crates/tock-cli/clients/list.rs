@@ -29,7 +29,7 @@ fn main() -> ExitCode {
 fn run(json: bool) -> Result<(), CliError> {
     let board = context()?;
     let mut device = connect()?;
-    let (_, found) = apps::discover(&mut device, &board)?;
+    let (_, found) = apps::installed(&mut device, &board)?;
 
     let apps: Vec<_> = found
         .apps()

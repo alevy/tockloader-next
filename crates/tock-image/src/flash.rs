@@ -109,11 +109,4 @@ impl Flash {
         // they can never abut.
         gaps
     }
-
-    /// Apply writes, so the known state matches the device after writing.
-    pub fn apply(&mut self, runs: &[crate::WriteRun]) {
-        for w in runs {
-            self.insert(w.address, &w.data);
-        }
-    }
 }

@@ -50,15 +50,16 @@ fn run(args: &Args) -> Result<(), CliError> {
         args.tabs.clone()
     };
 
-    let mut install = Vec::new();
-    for tab in &tabs {
-        install.push(load_tab(&board, tab)?);
-    }
+    let install = tabs
+        .iter()
+        .map(|tab| load_tab(&board, tab))
+        .collect::<Result<Vec<NewApp>, _>>()?;
+
     let request = Request {
         install,
+        uninstall: vec![],
         allow_repack: args.allow_repack,
         include_sticky: args.include_sticky,
-        ..Default::default()
     };
 
     let mut device = connect()?;

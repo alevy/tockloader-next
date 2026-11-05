@@ -6,6 +6,12 @@
 //! `tock`, whatever it does, and none of this is. A `tock-listen` or a
 //! `tock-tickv` needs a connection and a board; it does not need a planner.
 //!
+//! This is the device-facing loop [`tock_image`] says lives in the caller.
+//! That crate is pure: it walks, plans and renders against whatever bytes
+//! are known, and asks for more by returning rather than reading. This is
+//! what answers -- so the two read as parallel, and are not: there is one
+//! walk, one planner and one renderer, each called from here exactly once.
+//!
 //! Only what is genuinely shared lives here. `load_tab` does not: `install`
 //! is the only command that reads a TAB.
 //!
@@ -57,8 +63,13 @@ pub fn with_reads<T>(
     }
 }
 
-/// Walk the app list on the device.
-pub fn discover(device: &mut Client, board: &Resolved) -> Result<(Flash, Discovered), CliError> {
+/// The app list as the device has it, and the flash we read to find out.
+///
+/// Named for the answer rather than the verb, because
+/// [`tock_image::discover`] is the verb and this calls it. What it adds is
+/// everything that is not the walk: the capability check, the region, and
+/// the bytes.
+pub fn installed(device: &mut Client, board: &Resolved) -> Result<(Flash, Discovered), CliError> {
     device
         .require(Capability::MemoryRead, "reading apps")
         .map_err(proto)?;
@@ -84,7 +95,7 @@ pub fn apply(
             .require(Capability::MemoryWrite, "changing apps")
             .map_err(proto)?;
     }
-    let (mut flash, found) = discover(device, board)?;
+    let (mut flash, found) = installed(device, board)?;
     let app_ram = board.app_ram.map(|r| (r.start, r.size));
     let plan = tock_image::plan(&board.apps, &board.placement, app_ram, &found, request)
         .map_err(plan_error)?;
