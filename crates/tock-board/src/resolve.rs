@@ -20,7 +20,7 @@
 //! explain all of it.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -103,6 +103,45 @@ impl Context {
             .options
             .iter()
             .map(|(k, v)| (k.clone(), v.value.clone()))
+            .collect()
+    }
+    /// The directory each resolved option was written in, for a transport
+    /// that must resolve a relative path.
+    ///
+    /// This crate never decides what an option *means*, so provenance is all
+    /// it can offer: `path = "flash.bin"` is relative to whichever file said
+    /// so, and only [`Sourced`] knows which that was. Absolute, because a
+    /// transport or a `tock broker` client does not reliably share `cwd`.
+    pub fn option_bases(&self, cwd: &Path) -> BTreeMap<String, String> {
+        let dir_of = |origin: Option<&String>| {
+            // A board reference like `bundled:nrf52840dk` is not a file and
+            // has no directory; values from one cannot be relative paths.
+            let Some(path) = origin.filter(|o| !o.starts_with("bundled:")).map(Path::new) else {
+                return cwd.to_path_buf();
+            };
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                cwd.join(path)
+            };
+            absolute.parent().unwrap_or(cwd).to_path_buf()
+        };
+
+        self.transport
+            .options
+            .iter()
+            .map(|(key, sourced)| {
+                let origin = match &sourced.source {
+                    // Flags and the environment are written at a prompt, not
+                    // in a file, so their base is wherever we were run.
+                    Source::Flag(_) | Source::Env(_) => None,
+                    // An alias records only its own name, so the file it was
+                    // written in is the user config.
+                    Source::Device(_) => self.user.as_ref(),
+                    Source::Project(o) | Source::User(o) | Source::Board(o) => Some(o),
+                };
+                (key.clone(), dir_of(origin).display().to_string())
+            })
             .collect()
     }
 }

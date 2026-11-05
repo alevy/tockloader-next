@@ -105,7 +105,7 @@ pub(crate) fn broker(g: &Global) -> Result<(), CliError> {
 /// the conversation is invisible once clients are separate processes.
 pub(crate) fn watched(broker: Broker, trace: bool) -> Box<dyn Connection> {
     if trace {
-        Box::new(device::Traced {
+        Box::new(tock_proto::Traced {
             peer: "client",
             inner: Box::new(broker),
         })

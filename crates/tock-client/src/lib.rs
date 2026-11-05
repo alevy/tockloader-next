@@ -18,9 +18,8 @@
 
 mod error;
 
-use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 
 use std::path::Path;
 use tock_board::Resolved;
@@ -29,7 +28,7 @@ use tock_image::{
     Discovered, Flash, NeedRead, NewApp, Plan, PlanError, Request, WriteRun, coalesce,
 };
 use tock_proto::{
-    Capability, Connection, ErrorKind, ProtoError, Request as Rq, Response, StreamChannel,
+    Capability, Connection, ErrorKind, ProtoError, Request as Rq, Response, Spawned, StreamChannel,
 };
 
 pub use error::{CliError, Code};
@@ -383,31 +382,13 @@ pub fn connect() -> Result<Box<dyn Connection>, CliError> {
             CliError::new(Code::Device, format!("cannot start `tock broker`: {e}"))
                 .hint("run this through `tock <name>`, or put `tock` on PATH")
         })?;
-    Ok(Box::new(Brokered {
+    Ok(Box::new(Spawned {
         channel: StreamChannel {
             reader: child.stdout.take().expect("piped"),
             writer: child.stdin.take().expect("piped"),
         },
         child,
     }))
-}
-
-/// A `tock broker` we started, reaped when the connection goes.
-struct Brokered<R: Read, W: Write> {
-    channel: StreamChannel<R, W>,
-    child: Child,
-}
-
-impl<R: Read, W: Write> Connection for Brokered<R, W> {
-    fn call(&mut self, request: Rq, payload: Vec<u8>) -> Result<(Response, Vec<u8>), ProtoError> {
-        self.channel.call(request, payload)
-    }
-}
-
-impl<R: Read, W: Write> Drop for Brokered<R, W> {
-    fn drop(&mut self) {
-        let _ = self.child.wait();
-    }
 }
 
 /// What `tock` resolved: the board, where apps go, and the project's TABs.

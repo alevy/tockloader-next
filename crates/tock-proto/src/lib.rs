@@ -344,6 +344,71 @@ impl<R: Read, W: Write> Connection for StreamChannel<R, W> {
     }
 }
 
+/// A [`Connection`] to a process we started, reaped when the connection goes.
+///
+/// Both ends of the tool need this and had written it twice: `tock` spawns a
+/// `tock-transport-<name>`, and a subcommand run on its own spawns
+/// `tock broker`. Neither cares which, which is the point of the trait.
+pub struct Spawned<R: Read, W: Write> {
+    pub channel: StreamChannel<R, W>,
+    pub child: std::process::Child,
+}
+
+impl<R: Read, W: Write> Connection for Spawned<R, W> {
+    fn call(
+        &mut self,
+        request: Request,
+        payload: Vec<u8>,
+    ) -> Result<(Response, Vec<u8>), ProtoError> {
+        self.channel.call(request, payload)
+    }
+}
+
+impl<R: Read, W: Write> Drop for Spawned<R, W> {
+    fn drop(&mut self) {
+        let _ = self.child.wait();
+    }
+}
+
+/// A [`Connection`] that logs every message to stderr and forwards it.
+///
+/// One trait for both ends is what makes this ordinary -- and what lets the
+/// same decorator watch either conversation. Wrapping a transport shows what
+/// we ask a device; wrapping a broker shows what a subcommand asks us. `peer`
+/// says which, since with both on they interleave.
+///
+/// `->` is always the request and `<-` always the answer, whichever side of
+/// it we are.
+pub struct Traced {
+    pub peer: &'static str,
+    pub inner: Box<dyn Connection>,
+}
+
+impl Connection for Traced {
+    fn call(
+        &mut self,
+        request: Request,
+        payload: Vec<u8>,
+    ) -> Result<(Response, Vec<u8>), ProtoError> {
+        let peer = self.peer;
+        eprintln!(
+            "{peer} -> {} (+{} bytes)",
+            serde_json::to_string(&request).unwrap(),
+            payload.len()
+        );
+        let answer = self.inner.call(request, payload);
+        match &answer {
+            Ok((response, data)) => eprintln!(
+                "{peer} <- {} (+{} bytes)",
+                serde_json::to_string(response).unwrap(),
+                data.len()
+            ),
+            Err(e) => eprintln!("{peer} <- error: {e}"),
+        }
+        answer
+    }
+}
+
 /// Put a [`Connection`] behind a byte stream: read requests, answer them,
 /// until `Close` or end of stream. The inverse of [`StreamChannel`], and what
 /// every `tock-transport-*` executable runs in `main`.
