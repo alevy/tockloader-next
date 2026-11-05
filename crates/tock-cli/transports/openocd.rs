@@ -42,6 +42,7 @@ const FIELD: char = '\u{1f}';
 /// has none, and nothing further can be sent. Kept here rather than shared:
 /// `file.rs` has no second kind, and a helper designed against one consumer is
 /// a guess.
+#[cfg_attr(test, derive(Debug))]
 enum Failure {
     /// Answer the client with this. The connection is fine.
     Operation(Box<Response>),
@@ -198,20 +199,73 @@ fn resolve_config_entry(entry: &str, base: Option<&Path>) -> String {
 }
 
 /// The `config` option as a list, accepting either a bare string or an array.
-fn resolve_configs(options: &Options<'_>) -> Vec<String> {
+/// One step of openocd's config stage.
+///
+/// openocd has no notion of "the config files" and "the commands": `-f FILE`
+/// is shorthand for `-c "script FILE"`, and the command line is one ordered
+/// queue. The order is load-bearing, not cosmetic -- `transport select swd`
+/// must run after the interface file declares the adapter and before the
+/// target file builds a TAP with it, or openocd stops with "Debug adapter
+/// doesn't support any transports?".
+#[derive(Debug, PartialEq)]
+enum Step {
+    File(String),
+    Command(String),
+}
+
+impl Step {
+    fn args(&self) -> [&str; 2] {
+        match self {
+            Step::File(path) => ["-f", path],
+            Step::Command(command) => ["-c", command],
+        }
+    }
+}
+
+/// Read `config` into the ordered steps openocd will run.
+///
+/// A bare string is a config file, which is the common case and stays
+/// terse. A table carries either `command` (TCL, run as given) or `file`
+/// (the long form of the string).
+fn resolve_configs(options: &Options<'_>) -> Result<Vec<Step>, Failure> {
     let Some(value) = options.get("config") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let base = options.base_dir("config");
-    let entries: Vec<&str> = match value {
-        serde_json::Value::String(s) => vec![s.as_str()],
-        serde_json::Value::Array(a) => a.iter().filter_map(|v| v.as_str()).collect(),
-        _ => Vec::new(),
+    let entries: Vec<&serde_json::Value> = match value {
+        serde_json::Value::Array(entries) => entries.iter().collect(),
+        single => vec![single],
     };
     entries
         .into_iter()
-        .map(|e| resolve_config_entry(e, base.as_deref()))
+        .map(|entry| config_step(entry, base.as_deref()))
         .collect()
+}
+
+fn config_step(entry: &serde_json::Value, base: Option<&Path>) -> Result<Step, Failure> {
+    if let Some(path) = entry.as_str() {
+        return Ok(Step::File(resolve_config_entry(path, base)));
+    }
+    if let Some(table) = entry.as_object() {
+        if let Some(command) = table.get("command").and_then(|v| v.as_str()) {
+            return Ok(Step::Command(command.to_string()));
+        }
+        if let Some(path) = table.get("file").and_then(|v| v.as_str()) {
+            return Ok(Step::File(resolve_config_entry(path, base)));
+        }
+    }
+    // Not skipped: a dropped entry means openocd runs without the step and
+    // fails later saying something unrelated, which is the worst outcome
+    // available. A typo should say it is a typo.
+    Err(Response::error(
+        ErrorKind::Selection,
+        format!("`config` entry {entry} is neither a path nor a command"),
+    )
+    .with_suggestion(
+        "a config file is a bare string: \"interface/cmsis-dap.cfg\"\n\
+         a TCL command is a table: { command = \"transport select swd\" }",
+    )
+    .into())
 }
 
 /// A running openocd and the connection to its TCL port.
@@ -229,7 +283,7 @@ struct Session {
 impl Session {
     fn start(
         command: &str,
-        configs: &[String],
+        configs: &[Step],
         debug_level: i64,
         page_size: u64,
     ) -> Result<Session, ProtoError> {
@@ -240,7 +294,7 @@ impl Session {
 
         let log = NamedTempFile::new()?;
         let mut openocd = Command::new(command)
-            .args(configs.iter().flat_map(|c| ["-f", c]))
+            .args(configs.iter().flat_map(Step::args))
             .args(["-c", &format!("tcl_port {port}")])
             .args(["-c", "telnet_port disabled"])
             .args(["-c", "gdb_port disabled"])
@@ -424,7 +478,7 @@ impl OpenocdTransport {
     fn open(&mut self, flash: FlashInfo, options: Options<'_>) -> Result<(), Failure> {
         // Replace any previous session, so its openocd is killed by Drop.
         self.session = None;
-        let configs = resolve_configs(&options);
+        let configs = resolve_configs(&options)?;
         if configs.is_empty() {
             return Err(Response::error(
                 ErrorKind::Selection,

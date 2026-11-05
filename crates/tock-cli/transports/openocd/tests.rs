@@ -2,6 +2,8 @@
 
 use super::*;
 
+use std::collections::BTreeMap;
+
 fn reply(raw: &str) -> TclReply {
     TclReply::parse(raw).expect("parses")
 }
@@ -101,20 +103,60 @@ fn config_entries_resolve_next_to_the_file_that_named_them() {
 }
 
 #[test]
-fn config_accepts_a_bare_string_as_well_as_a_list() {
-    let bases = std::collections::BTreeMap::new();
-    let one = serde_json::json!({"config": "a.cfg"});
-    let many = serde_json::json!({"config": ["a.cfg", "b.cfg"]});
-    let none = serde_json::json!({});
+fn config_is_an_ordered_list_of_files_and_commands() {
+    let bases = BTreeMap::new();
+    let configs = |v: serde_json::Value| {
+        let map = v.as_object().unwrap().clone();
+        resolve_configs(&Options::new(&map, &bases))
+    };
+    let file = |p: &str| Step::File(p.into());
+    let command = |c: &str| Step::Command(c.into());
+
+    // A bare string is a config file. One or many, as before.
     assert_eq!(
-        resolve_configs(&Options::new(one.as_object().unwrap(), &bases)),
-        vec!["a.cfg"]
+        configs(serde_json::json!({"config": "a.cfg"})).unwrap(),
+        vec![file("a.cfg")]
     );
     assert_eq!(
-        resolve_configs(&Options::new(many.as_object().unwrap(), &bases)),
-        vec!["a.cfg", "b.cfg"]
+        configs(serde_json::json!({"config": ["a.cfg", "b.cfg"]})).unwrap(),
+        vec![file("a.cfg"), file("b.cfg")]
     );
-    assert!(resolve_configs(&Options::new(none.as_object().unwrap(), &bases)).is_empty());
+    assert!(configs(serde_json::json!({})).unwrap().is_empty());
+
+    // The point of the exercise: a command keeps its place between two
+    // files. `transport select` after the interface and before the target
+    // is the only order openocd accepts.
+    assert_eq!(
+        configs(serde_json::json!({"config": [
+            "interface/cmsis-dap.cfg",
+            {"command": "transport select swd"},
+            "target/stm32wlx.cfg",
+        ]}))
+        .unwrap(),
+        vec![
+            file("interface/cmsis-dap.cfg"),
+            command("transport select swd"),
+            file("target/stm32wlx.cfg"),
+        ]
+    );
+    assert_eq!(
+        configs(serde_json::json!({"config": [{"file": "a.cfg"}]})).unwrap(),
+        vec![file("a.cfg")]
+    );
+
+    // And that is what openocd is told, in that order.
+    let steps = configs(serde_json::json!({"config": [
+        "a.cfg", {"command": "transport select swd"},
+    ]}))
+    .unwrap();
+    let args: Vec<&str> = steps.iter().flat_map(Step::args).collect();
+    assert_eq!(args, ["-f", "a.cfg", "-c", "transport select swd"]);
+
+    // An entry we cannot read is an error, not a silent omission. Dropping
+    // it would leave openocd to fail later with something unrelated.
+    let bad = configs(serde_json::json!({"config": [{"comand": "typo"}]}));
+    assert!(bad.is_err(), "a misspelled key was accepted");
+    assert!(configs(serde_json::json!({"config": [42]})).is_err());
 }
 
 /// openocd programs whatever address it is handed, so this check is the
