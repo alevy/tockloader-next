@@ -22,4 +22,4 @@ thiserror = "1"
 tempfile = "3.27"
 libc = "0.2"
 anyhow = "1"
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env", "string"] }

@@ -25,27 +25,20 @@ mod external;
 
 use std::process::ExitCode;
 
-use clap::{CommandFactory, FromArgMatches};
 use serde_json::json;
 
 use broker::broker;
-use cli::{Cli, Command, ConfigCommand, Format};
+use cli::{Command, ConfigCommand, Format, Global};
 use config::config_show;
 use external::external;
 use tock_client::CliError;
 
 fn main() -> ExitCode {
-    // `after_help` is built at runtime because the answer is whatever is
-    // installed, not whatever we shipped.
-    let matches = Cli::command()
-        .after_help(external::installed())
-        .get_matches();
-    let cli = match Cli::from_arg_matches(&matches) {
-        Ok(cli) => cli,
-        Err(e) => e.exit(),
-    };
-    let format = cli.global.format;
-    match run(cli) {
+    // The parser is built at runtime because which commands exist is a fact
+    // about this machine, not about what we shipped.
+    let (global, command) = cli::parse(&external::installed());
+    let format = global.format;
+    match run(global, command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             if format == Format::Json {
@@ -64,9 +57,8 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<(), CliError> {
-    let g = cli.global;
-    match cli.command {
+fn run(g: Global, command: Command) -> Result<(), CliError> {
+    match command {
         Command::Config {
             command: ConfigCommand::Show,
         } => config_show(&g),

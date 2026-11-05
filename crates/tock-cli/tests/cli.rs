@@ -3,6 +3,7 @@
 //! The `python_*` tests compare against Python tockloader byte for byte. They
 //! run only when `TOCKLOADER_PY` points at a `tockloader` executable.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -823,10 +824,11 @@ fn a_subcommand_owns_its_own_arguments() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--oops"));
 
-    // And `tock --help` names them without having compiled them in. With no
-    // PATH at all, to pin down that we look beside `tock` first: that is the
-    // case that matters, since it is how a cargo-installed `tock` and the
-    // subcommands installed alongside it find each other.
+    // And `tock --help` lists them among the commands rather than in a
+    // footnote, without having compiled them in. With no PATH at all, to pin
+    // down that we look beside `tock` first: that is the case that matters,
+    // since it is how a cargo-installed `tock` and the subcommands installed
+    // alongside it find each other.
     let help = ok(Command::new(env!("CARGO_BIN_EXE_tock"))
         .args(["--help"])
         .current_dir(&d.0)
@@ -834,9 +836,32 @@ fn a_subcommand_owns_its_own_arguments() {
         .env("TOCK_CONFIG", d.path("no-user-config.toml"))
         .output()
         .unwrap());
-    let listed = help.split("Commands from").nth(1).unwrap_or_default();
-    for name in ["install", "list", "uninstall"] {
-        assert!(listed.contains(name), "{name} missing from:\n{help}");
+    let commands = help.split("Options:").next().unwrap();
+    for name in ["install", "list", "uninstall", "broker", "context"] {
+        assert!(commands.contains(name), "{name} missing from:\n{help}");
     }
-    assert!(!listed.contains("transport-file"), "{help}");
+    // A transport is spoken to over a pipe, not typed.
+    assert!(!help.contains("transport-file"), "{help}");
+
+    // Registering a found name must not collide with one clap generates
+    // itself, or an unlucky binary on PATH takes the whole tool down.
+    let bin = d.path("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in ["tock-help", "tock-context"] {
+        let p = bin.join(name);
+        std::fs::write(&p, "#!/bin/sh\nexit 7\n").unwrap();
+        std::fs::set_permissions(&p, PermissionsExt::from_mode(0o755)).unwrap();
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["--help"])
+        .current_dir(&d.0)
+        .env("PATH", &bin)
+        .env("TOCK_CONFIG", d.path("no-user-config.toml"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

@@ -1,14 +1,21 @@
 //! The command line as the user types it: global flags, subcommands, and the
 //! arguments each one takes. Nothing here does any work.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+
+/// Where a registered subcommand's untouched arguments are collected.
+const ARGS: &str = "args";
+
+const AFTER_HELP: &str = "Any command above that `tock` does not answer itself is a `tock-<name>`\n\
+    binary, found next to `tock` or on PATH. Install one and it appears here.";
 
 #[derive(Parser)]
 #[command(
     name = "tock",
     version,
     about = "Install and manage apps on Tock boards",
-    allow_external_subcommands = true
+    allow_external_subcommands = true,
+    after_help = AFTER_HELP
 )]
 pub(crate) struct Cli {
     #[command(flatten)]
@@ -75,4 +82,62 @@ pub(crate) fn parse_kv(s: &str) -> Result<(String, String), String> {
     s.split_once('=')
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .ok_or_else(|| format!("expected key=value, got `{s}`"))
+}
+
+/// The parser, plus one subcommand per `tock-*` binary on this machine.
+///
+/// They are registered so that `tock --help` lists them where a user looks
+/// for them, beside the commands `tock` answers itself. A user should not
+/// have to know which is which, and on someone else's machine the answer
+/// differs anyway.
+///
+/// Registration buys that line and nothing else. Each one disables `--help`
+/// and swallows every argument verbatim, so `tock` still parses no
+/// subcommand's flags -- it only now knows enough names to print them. We
+/// can say which binary provides a command but not what it does, since a
+/// description would mean running it.
+fn command(installed: &[String]) -> clap::Command {
+    let mut command = Cli::command();
+    for name in installed {
+        // A name `tock` already answers wins; so does `help`, which clap
+        // generates after this runs and would otherwise be a duplicate.
+        if name == "help" || command.find_subcommand(name.as_str()).is_some() {
+            continue;
+        }
+        command = command.subcommand(
+            clap::Command::new(name.clone())
+                .about(format!("Provided by `tock-{name}`"))
+                .disable_help_flag(true)
+                .arg(
+                    clap::Arg::new(ARGS)
+                        .num_args(..)
+                        .trailing_var_arg(true)
+                        .allow_hyphen_values(true),
+                ),
+        );
+    }
+    command
+}
+
+/// What the user typed, in the two pieces [`run`](crate::run) wants.
+///
+/// A registered subcommand comes back as [`Command::External`], the same
+/// arm as a name we have never heard of -- which is the point. Knowing a
+/// name well enough to print it is not knowing anything about its
+/// arguments.
+pub(crate) fn parse(installed: &[String]) -> (Global, Command) {
+    let matches = command(installed).get_matches();
+    let global = Global::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let command = match matches.subcommand() {
+        Some((name, rest)) if installed.iter().any(|n| n == name) => {
+            let args = rest.get_many::<String>(ARGS).into_iter().flatten().cloned();
+            Command::External(std::iter::once(name.to_string()).chain(args).collect())
+        }
+        _ => {
+            Cli::from_arg_matches(&matches)
+                .unwrap_or_else(|e| e.exit())
+                .command
+        }
+    };
+    (global, command)
 }

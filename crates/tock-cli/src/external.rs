@@ -30,12 +30,11 @@ fn search_path() -> impl Iterator<Item = PathBuf> {
     beside.into_iter().chain(on_path)
 }
 
-/// The subcommands that exist on this machine, for `tock --help`.
+/// The subcommands that exist on this machine, sorted.
 ///
-/// We can list their names but not what they do: a description would mean
-/// running each one. Transports are excluded -- `tock-transport-file` is
-/// spoken to over a pipe, not typed.
-pub(crate) fn installed() -> String {
+/// Transports are excluded: `tock-transport-file` is spoken to over a pipe,
+/// not typed.
+pub(crate) fn installed() -> Vec<String> {
     let mut names: Vec<String> = search_path()
         .filter_map(|d| std::fs::read_dir(d).ok())
         .flatten()
@@ -49,13 +48,7 @@ pub(crate) fn installed() -> String {
         .collect();
     names.sort();
     names.dedup();
-    if names.is_empty() {
-        return String::new();
-    }
-    format!(
-        "Commands from `tock-*` binaries:\n  {}\n\nRun `tock <command> --help` for one of those.",
-        names.join(", ")
-    )
+    names
 }
 
 /// A file we could actually run. Both callers want this: listing a command
