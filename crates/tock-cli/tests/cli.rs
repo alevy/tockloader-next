@@ -823,8 +823,17 @@ fn a_subcommand_owns_its_own_arguments() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--oops"));
 
-    // And `tock --help` names them without having compiled them in.
-    let help = ok(tock(&d, &["--help"]));
+    // And `tock --help` names them without having compiled them in. With no
+    // PATH at all, to pin down that we look beside `tock` first: that is the
+    // case that matters, since it is how a cargo-installed `tock` and the
+    // subcommands installed alongside it find each other.
+    let help = ok(Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["--help"])
+        .current_dir(&d.0)
+        .env_remove("PATH")
+        .env("TOCK_CONFIG", d.path("no-user-config.toml"))
+        .output()
+        .unwrap());
     let listed = help.split("Commands from").nth(1).unwrap_or_default();
     for name in ["install", "list", "uninstall"] {
         assert!(listed.contains(name), "{name} missing from:\n{help}");

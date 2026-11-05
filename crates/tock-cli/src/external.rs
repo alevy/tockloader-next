@@ -10,7 +10,7 @@
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tock_board::Resolved;
 
@@ -40,7 +40,7 @@ pub(crate) fn installed() -> String {
         .filter_map(|d| std::fs::read_dir(d).ok())
         .flatten()
         .flatten()
-        .filter(|e| executable(e.path()))
+        .filter(|e| executable(&e.path()))
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
             let name = name.strip_prefix("tock-")?;
@@ -58,13 +58,16 @@ pub(crate) fn installed() -> String {
     )
 }
 
-fn executable(path: PathBuf) -> bool {
+/// A file we could actually run. Both callers want this: listing a command
+/// we would refuse to spawn, or spawning one we would not list, is the same
+/// mistake in two directions.
+fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
-    search_path().map(|d| d.join(name)).find(|p| p.is_file())
+    search_path().map(|d| d.join(name)).find(|p| executable(p))
 }
 
 /// `tock foo ...` runs `tock-foo ...`.
