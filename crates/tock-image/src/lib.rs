@@ -196,3 +196,20 @@ pub fn discover(region: &Region, flash: &Flash) -> Result<Discovered, NeedRead> 
     }
     Ok(Discovered { entries })
 }
+
+/// Helpers for tests, here and in crates that use this one.
+///
+/// Not part of the contract: a real caller never has all of flash to hand,
+/// which is the entire reason [`NeedRead`] exists. A test does, so it says
+/// so here rather than through an API shaped for someone who does not.
+#[doc(hidden)]
+pub mod testing {
+    use crate::{Flash, Region};
+
+    /// A [`Flash`] that already knows everything: an image covering `base..`.
+    pub fn loaded(region: &Region, base: u64, image: &[u8]) -> Flash {
+        let mut flash = Flash::new(region);
+        flash.insert(base, image);
+        flash
+    }
+}

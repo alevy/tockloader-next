@@ -27,13 +27,6 @@ impl Flash {
         }
     }
 
-    /// Everything known: e.g. a flash image file covering `base..`.
-    pub fn from_image(region: &Region, base: u64, image: &[u8]) -> Flash {
-        let mut f = Flash::new(region);
-        f.insert(base, image);
-        f
-    }
-
     /// Record known bytes, merging with anything they touch or abut.
     pub fn insert(&mut self, address: u64, data: &[u8]) {
         if data.is_empty() {
