@@ -11,6 +11,14 @@ name = "tock"
 path = "src/main.rs"
 
 [[bin]]
+name = "tock-install"
+path = "clients/install.rs"
+
+[[bin]]
+name = "tock-uninstall"
+path = "clients/uninstall.rs"
+
+[[bin]]
 name = "tock-list"
 path = "clients/list.rs"
 

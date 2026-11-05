@@ -62,7 +62,10 @@ fn run(json: bool) -> Result<(), CliError> {
     }
     if apps.is_empty() {
         println!("no apps installed");
+        return Ok(());
     }
+
+    println!("Apps:");
     for app in &apps {
         let flag = |key: &str, when: bool, text: &str| {
             (app[key].as_bool().unwrap_or(false) == when).then(|| text.to_string())

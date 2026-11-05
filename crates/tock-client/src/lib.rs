@@ -22,9 +22,15 @@ use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
 use std::process::{Child, Command, Stdio};
 
+use std::path::Path;
 use tock_board::Resolved;
-use tock_image::{Flash, NeedRead, WriteRun, coalesce};
-use tock_proto::{Capability, Connection, ErrorKind, ProtoError, Request, Response, StreamChannel};
+
+use tock_image::{
+    Discovered, Flash, NeedRead, NewApp, Plan, PlanError, Request, WriteRun, coalesce,
+};
+use tock_proto::{
+    Capability, Connection, ErrorKind, ProtoError, Request as Rq, Response, StreamChannel,
+};
 
 pub use error::{CliError, Code};
 
@@ -33,6 +39,12 @@ pub use error::{CliError, Code};
 /// this is round-trip cost against per-byte cost, and one value for every
 /// transport is a placeholder.
 const READ_GAP: u64 = 256;
+
+/// How far apart two changed runs may be before writing them separately beats
+/// bridging the bytes between them. For a transport that erases before
+/// writing the answer is one byte less than its erase block; until a
+/// transport declares its own, this assumes 4 KiB.
+const WRITE_GAP: u64 = 4095;
 
 /// The device `tock` opened for us.
 ///
@@ -48,7 +60,7 @@ pub struct Session {
 impl Session {
     /// Greet whatever is on the other end and learn what it can do.
     pub fn open(mut connection: Box<dyn Connection>) -> Result<Session, CliError> {
-        let hello = Request::Hello {
+        let hello = Rq::Hello {
             protocol: tock_proto::PROTOCOL_VERSION,
             client: format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
         };
@@ -104,7 +116,7 @@ impl Session {
     pub fn read_ranges(&mut self, ranges: &[(u64, u64)]) -> Result<Vec<(u64, Vec<u8>)>, CliError> {
         let mut out = Vec::new();
         for (address, len) in coalesce(ranges, READ_GAP) {
-            let (_, data) = answered(self.connection.call(Request::Read { address, len }, vec![]))?;
+            let (_, data) = answered(self.connection.call(Rq::Read { address, len }, vec![]))?;
             // A short reply would leave a read loop asking for the same bytes
             // forever. Say so instead of hanging.
             if data.len() as u64 != len {
@@ -127,7 +139,7 @@ impl Session {
     pub fn write_runs(&mut self, runs: &[WriteRun]) -> Result<(), CliError> {
         for run in runs {
             answered(self.connection.call(
-                Request::Write {
+                Rq::Write {
                     address: run.address,
                 },
                 run.data.clone(),
@@ -144,18 +156,14 @@ impl Session {
     /// [`Session::call`] would do.
     pub fn forward(
         &mut self,
-        request: Request,
+        request: Rq,
         payload: Vec<u8>,
     ) -> Result<(Response, Vec<u8>), ProtoError> {
         self.connection.call(request, payload)
     }
 
     /// Send a request and treat a refusal as this command's failure.
-    pub fn call(
-        &mut self,
-        request: Request,
-        payload: Vec<u8>,
-    ) -> Result<(Response, Vec<u8>), CliError> {
+    pub fn call(&mut self, request: Rq, payload: Vec<u8>) -> Result<(Response, Vec<u8>), CliError> {
         answered(self.connection.call(request, payload))
     }
 
@@ -181,9 +189,166 @@ impl Session {
     }
 }
 
+impl Session {
+    /// Walk the app list on the device.
+    pub fn discover(&mut self, board: &Resolved) -> Result<(Flash, Discovered), CliError> {
+        self.require(Capability::MemoryRead, "reading apps")?;
+        let mut flash = Flash::new(&board.apps);
+        let found = self.with_reads(&mut flash, |f| tock_image::discover(&board.apps, f))?;
+        Ok((flash, found))
+    }
+
+    /// Plan a change, make the device match, and check that it did.
+    ///
+    /// The whole of what `install` and `uninstall` have in common. They
+    /// differ only in the [`Request`] they build and the arguments they
+    /// parse; everything from here is the same work, and sharing it is what
+    /// keeps two separate binaries behaving like one tool.
+    pub fn apply(
+        &mut self,
+        board: &Resolved,
+        request: &Request,
+        dry_run: bool,
+    ) -> Result<Applied, CliError> {
+        if !dry_run {
+            self.require(Capability::MemoryWrite, "changing apps")?;
+        }
+        let (mut flash, found) = self.discover(board)?;
+        let app_ram = board.app_ram.map(|r| (r.start, r.size));
+        let plan = tock_image::plan(&board.apps, &board.placement, app_ram, &found, request)
+            .map_err(plan_error)?;
+        let writes = self.with_reads(&mut flash, |f| {
+            tock_image::render(&board.apps, &plan, f, WRITE_GAP)
+        })?;
+        if !dry_run {
+            self.write_runs(&writes)?;
+            self.verify(&writes)?;
+        }
+        Ok(Applied { plan, writes })
+    }
+
+    /// Read back what was written and compare. Reads coalesce, so one reply
+    /// can cover several runs: find the one containing each.
+    fn verify(&mut self, writes: &[WriteRun]) -> Result<(), CliError> {
+        let ranges: Vec<(u64, u64)> = writes
+            .iter()
+            .map(|w| (w.address, w.data.len() as u64))
+            .collect();
+        let read_back = self.read_ranges(&ranges)?;
+        for run in writes {
+            let end = run.address + run.data.len() as u64;
+            let got = read_back
+                .iter()
+                .find(|(at, data)| *at <= run.address && at + data.len() as u64 >= end)
+                .map(|(at, data)| {
+                    let offset = (run.address - at) as usize;
+                    &data[offset..offset + run.data.len()]
+                });
+            if got != Some(run.data.as_slice()) {
+                return Err(CliError::new(
+                    Code::Verify,
+                    format!("{:#x} did not verify after writing", run.address),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What a change came to: where things ended up, and what it cost to say so.
+pub struct Applied {
+    pub plan: Plan,
+    pub writes: Vec<WriteRun>,
+}
+
+impl Applied {
+    /// Say what happened, the way every app-changing subcommand says it.
+    /// Shared so two binaries cannot drift into two output formats.
+    pub fn report(&self, dry_run: bool) {
+        if json_output() {
+            let runs: Vec<_> = self
+                .writes
+                .iter()
+                .map(|w| serde_json::json!({ "address": w.address, "bytes": w.data.len() }))
+                .collect();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "dry_run": dry_run,
+                    "plan": self.plan,
+                    "writes": runs,
+                })
+            );
+            return;
+        }
+        for action in &self.plan.actions {
+            println!("{action}");
+        }
+        let bytes: usize = self.writes.iter().map(|w| w.data.len()).sum();
+        let verb = if dry_run { "would" } else { "did" };
+        println!(
+            "{verb} write {bytes} byte(s) in {} run(s)",
+            self.writes.len()
+        );
+    }
+}
+
+/// A TAB, with the builds that suit this board picked out.
+pub fn load_tab(board: &Resolved, path: &Path) -> Result<NewApp, CliError> {
+    let shown = path.display();
+    let bytes =
+        std::fs::read(path).map_err(|e| CliError::new(Code::Failed, format!("{shown}: {e}")))?;
+    let tab = tbf::Tab::parse(&bytes)
+        .map_err(|e| CliError::new(Code::Failed, format!("{shown}: {e}")))?;
+    if let Some(only) = tab.only_for_boards() {
+        if !only.contains(&board.board) {
+            return Err(CliError::new(
+                Code::Failed,
+                format!("{shown} is only for boards: {}", only.join(", ")),
+            ));
+        }
+    }
+    let tbfs = tab
+        .tbfs_for_arch(&board.arch)
+        .map_err(|e| CliError::new(Code::Failed, format!("{shown}: {e}")))?;
+    if tbfs.is_empty() {
+        return Err(CliError::new(
+            Code::Failed,
+            format!(
+                "{shown} has no build for `{}` (it has: {})",
+                board.arch,
+                tab.architectures().join(", ")
+            ),
+        ));
+    }
+    let name = tab
+        .name()
+        .map(str::to_string)
+        .or_else(|| tbfs[0].tbf.header.package_name().map(str::to_string))
+        .unwrap_or_else(|| shown.to_string());
+    Ok(NewApp {
+        name,
+        candidates: tbfs.into_iter().map(|t| t.tbf).collect(),
+    })
+}
+
+/// Turn a planning failure into something with a next step in it.
+pub fn plan_error(e: PlanError) -> CliError {
+    use PlanError::*;
+    let error = CliError::new(Code::Failed, e.to_string());
+    match e {
+        NeedsRepack { .. } => error
+            .hint("rerun with --allow-repack to let tock move other apps")
+            .hint("add --dry-run first to see what would move"),
+        Sticky { .. } => error.hint("rerun with --include-sticky"),
+        NotInstalled { .. } => error.hint("tock list"),
+        _ => error,
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.connection.call(Request::Close, vec![]);
+        let _ = self.connection.call(Rq::Close, vec![]);
     }
 }
 
@@ -234,11 +399,7 @@ struct Brokered<R: Read, W: Write> {
 }
 
 impl<R: Read, W: Write> Connection for Brokered<R, W> {
-    fn call(
-        &mut self,
-        request: Request,
-        payload: Vec<u8>,
-    ) -> Result<(Response, Vec<u8>), ProtoError> {
+    fn call(&mut self, request: Rq, payload: Vec<u8>) -> Result<(Response, Vec<u8>), ProtoError> {
         self.channel.call(request, payload)
     }
 }
@@ -370,7 +531,7 @@ mod tests {
     impl Connection for Stingy {
         fn call(
             &mut self,
-            _request: Request,
+            _request: Rq,
             _payload: Vec<u8>,
         ) -> Result<(Response, Vec<u8>), ProtoError> {
             Ok((Response::Data, vec![0xFF; 4]))

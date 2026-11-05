@@ -1,8 +1,6 @@
 //! The command line as the user types it: global flags, subcommands, and the
 //! arguments each one takes. Nothing here does any work.
 
-use std::path::PathBuf;
-
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
@@ -54,17 +52,19 @@ pub(crate) enum Command {
     /// List the apps on the board.
     List,
     /// Install apps (TAB files). With no TABs, installs the project's apps.
+    ///
+    /// Arguments are passed to `tock-install` untouched: `tock` does not
+    /// parse a subcommand's flags, whether we ship it or you do.
+    #[command(disable_help_flag = true)]
     Install {
-        tabs: Vec<PathBuf>,
-        #[command(flatten)]
-        change: ChangeArgs,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Remove apps by name.
+    #[command(disable_help_flag = true)]
     Uninstall {
-        #[arg(required = true)]
-        names: Vec<String>,
-        #[command(flatten)]
-        change: ChangeArgs,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Show the resolved configuration and where each value came from.
     Config {
@@ -81,19 +81,6 @@ pub(crate) enum Command {
 #[derive(Subcommand)]
 pub(crate) enum ConfigCommand {
     Show,
-}
-
-#[derive(Args)]
-pub(crate) struct ChangeArgs {
-    /// Show the plan without writing anything.
-    #[arg(long)]
-    pub(crate) dry_run: bool,
-    /// Allow moving apps that were not named, to make room.
-    #[arg(long)]
-    pub(crate) allow_repack: bool,
-    /// Allow removing or replacing sticky apps.
-    #[arg(long)]
-    pub(crate) include_sticky: bool,
 }
 
 pub(crate) fn parse_kv(s: &str) -> Result<(String, String), String> {

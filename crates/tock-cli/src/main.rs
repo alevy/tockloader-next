@@ -18,7 +18,6 @@
 //! identical to a built-in. Until then, `broker` is a door only strangers
 //! use.
 
-mod apps;
 mod broker;
 mod cli;
 mod config;
@@ -30,7 +29,6 @@ use std::process::ExitCode;
 use clap::Parser;
 use serde_json::json;
 
-use apps::{install, uninstall};
 use broker::broker;
 use cli::{Cli, Command, ConfigCommand, Format};
 use config::config_show;
@@ -59,6 +57,12 @@ fn main() -> ExitCode {
     }
 }
 
+/// An alias is just `tock <name>` spelled out, so it reaches the same binary
+/// by the same route.
+fn with_name(name: &str, rest: Vec<String>) -> Vec<String> {
+    std::iter::once(name.to_string()).chain(rest).collect()
+}
+
 fn run(cli: Cli) -> Result<(), CliError> {
     let g = cli.global;
     match cli.command {
@@ -69,8 +73,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
         // contributor would write, reached the same way.
         Command::List => external(&g, vec!["list".into()]),
         Command::Context => config::context(&g),
-        Command::Install { tabs, change } => install(&g, tabs, change),
-        Command::Uninstall { names, change } => uninstall(&g, names, change),
+        Command::Install { args } => external(&g, with_name("install", args)),
+        Command::Uninstall { args } => external(&g, with_name("uninstall", args)),
         Command::Broker => broker(&g),
         Command::External(args) => external(&g, args),
     }

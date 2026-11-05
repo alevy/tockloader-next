@@ -11,18 +11,6 @@ use tock_proto::{Connection, ErrorKind, FlashInfo, ProtoError, Request, Response
 
 use tock_client::{CliError, Code, Session};
 
-/// How far apart two changed runs may be before writing them separately beats
-/// bridging the bytes between them.
-///
-/// For a transport that erases before writing, the answer is exactly one byte
-/// less than its erase block. Two runs in the same or adjacent blocks cost the
-/// same erases either way, so merging them is free; a gap of a whole block or
-/// more would erase a block nothing needed to touch. So this wants to come
-/// from the transport -- `Hello` is the obvious place -- and until one
-/// declares it, this placeholder assumes the 4 KiB blocks both bundled boards
-/// have.
-pub(crate) const WRITE_GAP: u64 = 4095;
-
 /// A spawned transport, reaped when the connection goes.
 struct Spawned<R: std::io::Read, W: std::io::Write> {
     channel: StreamChannel<R, W>,

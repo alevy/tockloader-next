@@ -427,6 +427,7 @@ name = "tock-client"
 version = "0.0.1"
 dependencies = [
  "serde_json",
+ "tbf",
  "tock-board",
  "tock-image",
  "tock-proto",
