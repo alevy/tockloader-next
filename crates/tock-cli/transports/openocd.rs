@@ -24,7 +24,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tempfile::NamedTempFile;
-use tock_proto::{Capability, Connection, ErrorKind, Options, ProtoError, Request, Response};
+use tock_proto::{
+    Capability, Connection, ErrorKind, FlashInfo, Options, ProtoError, Request, Response,
+};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const STARTUP_POLL: Duration = Duration::from_millis(10);
@@ -412,10 +414,14 @@ fn tail_of(log: &NamedTempFile) -> String {
 #[derive(Default)]
 pub struct OpenocdTransport {
     session: Option<Session>,
+    /// The flash this transport was opened for. Every read and write is
+    /// checked against it: openocd will happily program whatever address it
+    /// is given, including the kernel or a bootloader.
+    flash: Option<FlashInfo>,
 }
 
 impl OpenocdTransport {
-    fn open(&mut self, options: Options<'_>) -> Result<(), Failure> {
+    fn open(&mut self, flash: FlashInfo, options: Options<'_>) -> Result<(), Failure> {
         // Replace any previous session, so its openocd is killed by Drop.
         self.session = None;
         let configs = resolve_configs(&options);
@@ -442,6 +448,29 @@ impl OpenocdTransport {
         // neighbour with it.
         let page_size = page_size_from(options.get("page_size").and_then(|v| v.as_u64()))?;
         self.session = Some(Session::start(command, &configs, debug_level, page_size)?);
+        self.flash = Some(flash);
+        Ok(())
+    }
+
+    /// Refuse an access outside the flash we were opened for.
+    ///
+    /// A transport owns its device's address map, and is the only thing that
+    /// can enforce it: it is a separate executable, so anyone who can spawn
+    /// it can talk to it with nothing in front.
+    fn check_range(&self, address: u64, len: u64) -> Result<(), Failure> {
+        let Some(flash) = &self.flash else {
+            return Err(Response::error(ErrorKind::InvalidRequest, "not open").into());
+        };
+        if address < flash.start || address + len > flash.start + flash.size {
+            return Err(Response::error(
+                ErrorKind::InvalidRequest,
+                format!(
+                    "{address:#x}+{len} is outside flash ({:#x} +{:#x})",
+                    flash.start, flash.size
+                ),
+            )
+            .into());
+        }
         Ok(())
     }
 
@@ -455,6 +484,7 @@ impl OpenocdTransport {
         if len == 0 {
             return Ok(Vec::new());
         }
+        self.check_range(address, len)?;
         self.session()?.dump(address, len)
     }
 
@@ -463,6 +493,7 @@ impl OpenocdTransport {
     /// back, overlaid, and written whole -- otherwise `erase` would take the
     /// neighbours with it.
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Failure> {
+        self.check_range(address, data.len() as u64)?;
         let session = self.session()?;
         match write_plan(session.page_size, address, data.len() as u64) {
             None => Ok(()),
@@ -496,11 +527,12 @@ impl OpenocdTransport {
                 vec![],
             )),
             Request::Open {
+                flash,
                 options,
                 option_bases,
                 ..
             } => {
-                self.open(Options::new(&options, &option_bases))?;
+                self.open(flash, Options::new(&options, &option_bases))?;
                 Ok((Response::Ok, vec![]))
             }
             Request::Read { address, len } => Ok((Response::Data, self.read(address, len)?)),
@@ -671,5 +703,42 @@ mod tests {
             vec!["a.cfg", "b.cfg"]
         );
         assert!(resolve_configs(&Options::new(none.as_object().unwrap(), &bases)).is_empty());
+    }
+
+    /// openocd programs whatever address it is handed, so this check is the
+    /// only thing between a wrong address and the kernel. It must come
+    /// before the session is touched -- otherwise a bad range on a closed
+    /// transport reports "not open" and the real problem goes unsaid.
+    #[test]
+    fn an_access_outside_flash_is_refused_before_openocd_is_asked() {
+        let mut t = OpenocdTransport {
+            session: None,
+            flash: Some(FlashInfo {
+                start: 0x8000_0000,
+                size: 0x4_0000,
+            }),
+        };
+        let refusal = |r: Result<_, Failure>| match r {
+            Err(Failure::Operation(response)) => match *response {
+                Response::Error { message, .. } => message,
+                other => panic!("{other:?}"),
+            },
+            _ => panic!("expected a refusal"),
+        };
+        // Below the region, past the end, and straddling the end.
+        let message = refusal(t.read(0x7fff_ffff, 4));
+        assert!(message.contains("outside flash"), "{message}");
+        assert!(
+            message.contains("0x8000_0000".replace('_', "").as_str()),
+            "{message}"
+        );
+        let message = refusal(t.write(0x8010_0000, &[0u8; 4]).map(|_| Vec::new()));
+        assert!(message.contains("outside flash"), "{message}");
+        let message = refusal(t.read(0x8003_fffe, 4));
+        assert!(message.contains("outside flash"), "{message}");
+        // And an access inside it gets past the check, to fail on the session
+        // instead -- which is how we know the check is not refusing everything.
+        let message = refusal(t.read(0x8002_0000, 4));
+        assert!(message.contains("not open"), "{message}");
     }
 }

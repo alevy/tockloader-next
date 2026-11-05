@@ -172,6 +172,14 @@ pub enum Capability {
     Vendor(String),
 }
 
+/// The flash a transport is opened for, from [`Request::Open`].
+///
+/// **A transport must refuse a `Read` or `Write` outside it**, with
+/// [`ErrorKind::InvalidRequest`]. Nothing in front can do this for it: a
+/// transport is an executable, so anyone who can spawn it can talk to it
+/// with no `tock` in the way. A device's address map is the transport's
+/// subject, and programming an address the client got wrong is how a kernel
+/// or a bootloader gets overwritten.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlashInfo {
     pub start: u64,

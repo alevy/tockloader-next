@@ -671,7 +671,7 @@ fn a_non_utf8_environment_variable_does_not_break_the_tool() {
 }
 
 #[test]
-fn the_broker_rejects_requests_outside_flash() {
+fn an_access_outside_flash_is_refused_by_the_transport() {
     use tock_proto::{Connection, Request, Response, StreamChannel};
     let d = Dir::new("broker_bounds");
     d.erased("flash.bin");
@@ -688,8 +688,11 @@ fn the_broker_rejects_requests_outside_flash() {
         reader: child.stdout.take().unwrap(),
         writer: child.stdin.take().unwrap(),
     };
-    // nrf52840dk flash is 1 MiB at 0; an external subcommand asking past the
-    // end must be refused here, not forwarded to the transport.
+    // nrf52840dk flash is 1 MiB at 0. The broker relays this; the transport
+    // refuses it. `tock` used to check here as well, which hid the fact that
+    // one of the two transports had no check at all -- and which protected
+    // only the path that happens to go through `tock`, when a transport is an
+    // executable anyone can spawn.
     let (r, _) = ch
         .call(
             Request::Read {
@@ -700,12 +703,7 @@ fn the_broker_rejects_requests_outside_flash() {
         )
         .unwrap();
     match r {
-        // Naming the board is how we know the broker refused it rather than
-        // relaying a transport's complaint: the transport knows no board name.
-        Response::Error { message, .. } => {
-            assert!(message.contains("outside flash"), "{message}");
-            assert!(message.contains("nrf52840dk"), "{message}");
-        }
+        Response::Error { message, .. } => assert!(message.contains("outside flash"), "{message}"),
         other => panic!("{other:?}"),
     }
     // A sub-page write is no longer anyone's business to refuse.
