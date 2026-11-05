@@ -6,11 +6,20 @@
 
 use std::process::ExitCode;
 
+use clap::Parser;
 use tock_client::{CliError, Session, connect, context};
 use tock_image::Flash;
 use tock_proto::Capability;
 
+/// `tock list` takes nothing, but it still parses: a subcommand owns its
+/// own arguments, so `--help` has to reach us rather than be answered by
+/// `tock`, and `tock list --oops` has to be an error rather than silence.
+#[derive(Parser)]
+#[command(name = "tock-list", about = "List the apps on the board")]
+struct Args {}
+
 fn main() -> ExitCode {
+    Args::parse();
     // `--format` belongs to `tock`, which forwards what a client must
     // honour. A subcommand parses its own arguments and not the global ones.
     match run(tock_client::json_output()) {

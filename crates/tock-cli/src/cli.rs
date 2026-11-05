@@ -45,27 +45,14 @@ pub(crate) enum Format {
     Json,
 }
 
+/// Only the commands `tock` answers itself. Everything else -- including
+/// `list`, `install` and `uninstall` -- is a `tock-<name>` binary reached
+/// through [`External`](Command::External), so there is one rule for
+/// arguments rather than one per subcommand: `tock` never parses them.
 #[derive(Subcommand)]
 pub(crate) enum Command {
     /// Print the resolved board as a subcommand receives it, as JSON.
     Context,
-    /// List the apps on the board.
-    List,
-    /// Install apps (TAB files). With no TABs, installs the project's apps.
-    ///
-    /// Arguments are passed to `tock-install` untouched: `tock` does not
-    /// parse a subcommand's flags, whether we ship it or you do.
-    #[command(disable_help_flag = true)]
-    Install {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Remove apps by name.
-    #[command(disable_help_flag = true)]
-    Uninstall {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
     /// Show the resolved configuration and where each value came from.
     Config {
         #[command(subcommand)]
@@ -74,6 +61,7 @@ pub(crate) enum Command {
     /// Serve the device protocol on stdio, connected to the resolved
     /// transport. For subcommands written in any language.
     Broker,
+    /// `tock foo --bar` is `tock-foo --bar`, arguments untouched.
     #[command(external_subcommand)]
     External(Vec<String>),
 }

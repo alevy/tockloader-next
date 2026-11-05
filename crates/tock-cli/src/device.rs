@@ -116,9 +116,9 @@ impl Connection for Traced {
 /// and forwards everything else.
 ///
 /// A decorator rather than something the broker does, so every path to a
-/// device has it: the built-in commands, and a third-party subcommand coming
-/// through `tock broker`. Only this layer knows which board it is, which is
-/// why it can say which one the address is outside of.
+/// device has it: a subcommand handed a connection, and one that ran `tock
+/// broker` itself. Only this layer knows which board it is, which is why it
+/// can say which one the address is outside of.
 struct Bounded {
     inner: Box<dyn Connection>,
     board: String,

@@ -1,9 +1,11 @@
-//! Handing off to a subcommand we do not ship.
+//! Handing off to a subcommand.
 //!
-//! `tock <name>` that is not built in becomes `tock-<name>`, found next to
-//! `tock` or on `PATH`. It inherits the resolved context and the flags it
-//! needs to run `tock broker`, so it reaches the device the same way a
-//! built-in command does.
+//! Every command but [`Context`](crate::cli::Command::Context),
+//! `config show` and [`Broker`](crate::cli::Command::Broker) arrives here:
+//! `tock <name>` becomes `tock-<name>`, found next to `tock` or on `PATH`.
+//! It inherits the resolved context and an open connection, and its
+//! arguments reach it untouched. `tock-list` is one we ship and `tock-tickv`
+//! is one we do not, and nothing below distinguishes them.
 
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -17,15 +19,52 @@ use crate::cli::Global;
 use crate::config::{load_context, project_apps};
 use tock_client::{CliError, Code};
 
-pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
+/// Every directory we look in, in the order we look.
+fn search_path() -> impl Iterator<Item = PathBuf> {
     let beside = std::env::current_exe()
         .ok()
-        .and_then(|e| e.parent().map(|d| d.join(name)));
+        .and_then(|e| e.parent().map(|d| d.to_path_buf()));
     let on_path = std::env::var_os("PATH")
         .into_iter()
-        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .map(|d| d.join(name));
-    beside.into_iter().chain(on_path).find(|p| p.is_file())
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>());
+    beside.into_iter().chain(on_path)
+}
+
+/// The subcommands that exist on this machine, for `tock --help`.
+///
+/// We can list their names but not what they do: a description would mean
+/// running each one. Transports are excluded -- `tock-transport-file` is
+/// spoken to over a pipe, not typed.
+pub(crate) fn installed() -> String {
+    let mut names: Vec<String> = search_path()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .flatten()
+        .filter(|e| executable(e.path()))
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let name = name.strip_prefix("tock-")?;
+            (!name.starts_with("transport-")).then(|| name.to_string())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Commands from `tock-*` binaries:\n  {}\n\nRun `tock <command> --help` for one of those.",
+        names.join(", ")
+    )
+}
+
+fn executable(path: PathBuf) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
+    search_path().map(|d| d.join(name)).find(|p| p.is_file())
 }
 
 /// `tock foo ...` runs `tock-foo ...`.

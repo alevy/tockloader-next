@@ -798,3 +798,36 @@ print("read:", data["result"])
     assert!(stdout.contains("memory_read"), "{stdout}");
     assert!(stdout.contains("read: data"), "{stdout}");
 }
+
+/// `tock` parses global flags and a subcommand name. It does not parse the
+/// subcommand's arguments -- not even `--help`, which is the one a built-in
+/// would be most tempted to answer itself. For a `tock-tickv` we have never
+/// seen, answering would mean describing flags we cannot know.
+#[test]
+fn a_subcommand_owns_its_own_arguments() {
+    // No board, no transport: parsing arguments never touches a device, so
+    // help has to work in a directory where nothing else would.
+    let d = Dir::new("subcommand-args");
+
+    // Its usage line, its flags -- not `tock`'s.
+    let help = ok(tock(&d, &["install", "--help"]));
+    assert!(help.contains("Usage: tock-install"), "{help}");
+    assert!(help.contains("--allow-repack"), "{help}");
+    assert!(!help.contains("--trace-protocol"), "{help}");
+
+    // Including the subcommand that takes no arguments at all: it still has
+    // to answer, rather than ignore what it was given.
+    let help = ok(tock(&d, &["list", "--help"]));
+    assert!(help.contains("Usage: tock-list"), "{help}");
+    let out = tock(&d, &["list", "--oops"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--oops"));
+
+    // And `tock --help` names them without having compiled them in.
+    let help = ok(tock(&d, &["--help"]));
+    let listed = help.split("Commands from").nth(1).unwrap_or_default();
+    for name in ["install", "list", "uninstall"] {
+        assert!(listed.contains(name), "{name} missing from:\n{help}");
+    }
+    assert!(!listed.contains("transport-file"), "{help}");
+}

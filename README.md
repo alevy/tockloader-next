@@ -16,37 +16,40 @@ crates/tock-cli    the `tock` binary and the `tock-transport-file` transport
 > **Provisional.** This order is being revised as the crates are audited; it
 > may change as things move or shrink.
 
-The system is two halves that meet in the CLI:
+The system is two halves that meet in a subcommand:
 
 ```
 tbf  <-  tock-image  <-  tock-board      what should flash look like?
 tock-proto                                how do bytes reach a device?
                    \    /
-                   tock-cli
+                tock-client               what a subcommand does
+                      |
+                   tock-cli               resolve it, then serve it
 ```
 
-Start with `run` in `crates/tock-cli/src/main.rs`. Its six arms are the
-structure: three porcelain commands where **we drive a transport**, `broker`
-where that inverts and **we serve the protocol to someone else**, `external`
-where third-party subcommands enter, and `config show` for what was resolved
-and from where. Then take one porcelain path all the way down. Then outwards:
+`tock` implements no command that touches a device. It resolves -- flags,
+`Tock.toml` and the user config into one answer about which board, which
+transport, where apps go -- and then serves the protocol over a pipe while a
+`tock-<name>` binary does the work. `tock list` runs `tock-list`; `tock
+tickv` would run `tock-tickv`, by the same route, with the same connection,
+and `tock` cannot tell the two apart.
 
-> To revisit: `run` shows the shape but does not explain it -- `main.rs` has a
-> one-line module doc. Whether the entrée ends up being prose there, or the
-> file is split so the structure is visible from the layout, is open.
+So read it in that order: what `tock` decides, then what a subcommand does
+with it, then down into the parts it uses.
 
 | | Read | For |
 |---|---|---|
-| 1 | `tock-cli/src/main.rs` -- `run` | the shape: six commands, two directions |
-| 1b | `tock-cli/src/main.rs` -- `change_apps`, `with_reads` | one porcelain path end to end: connect, discover, plan, render, write, verify |
-| 2 | `tock-image/src/lib.rs` | the discover / plan / render contract, and how the core asks for bytes it does not have |
-| 3 | `tock-proto/src/lib.rs` | the vocabulary: what you may ask a device to do |
-| 4 | `tock-cli/transports/file.rs` | the smallest complete transport, and what a new one copies |
-| 5 | `tock-board/src/resolve.rs` | where every setting came from, and why |
-| 6 | `tbf/` | the on-flash format, when you need it |
-| 7 | `tock-image/src/planner.rs` | where apps go. The hard part, and the last thing you need: a pure function with a stated contract |
+| 1 | `tock-cli/src/main.rs` -- the module doc, then `run` | the shape: four arms, none of which touch a device |
+| 2 | `tock-cli/clients/list.rs` | a whole subcommand in 90 lines, and how little one has to know |
+| 3 | `tock-client/src/lib.rs` -- `connect`, `Session::apply` | one path end to end: connect, discover, plan, render, write, verify |
+| 4 | `tock-image/src/lib.rs` | the discover / plan / render contract, and how the core asks for bytes it does not have |
+| 5 | `tock-proto/src/lib.rs` | the vocabulary: what you may ask a device to do |
+| 6 | `tock-cli/transports/file.rs` | the smallest complete transport, and what a new one copies |
+| 7 | `tock-board/src/resolve.rs` | where every setting came from, and why |
+| 8 | `tbf/` | the on-flash format, when you need it |
+| 9 | `tock-image/src/planner.rs` | where apps go. The hard part, and the last thing you need: a pure function with a stated contract |
 
-Steps 6 and 7 are the two largest files in the repo and both come last --
+Steps 8 and 9 are the two largest files in the repo and both come last --
 nothing about the architecture depends on them.
 
 ## Try it without hardware
