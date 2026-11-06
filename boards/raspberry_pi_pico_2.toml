@@ -30,7 +30,15 @@ default = "openocd"
 [connection.openocd]
 # The erase unit, which only this transport needs to know.
 page_size = 4096
-config = ["interface/cmsis-dap.cfg", "target/rp2350.cfg"]
+# Needs an openocd that knows RP2350: 0.13 or Raspberry Pi's fork. 0.12
+# ships rp2040.cfg only.
+target = ["target/rp2350.cfg"]
+# This board has *no* onboard debugger, so `probe` is a guess at the common
+# case -- a Raspberry Pi Debug Probe, or another Pico running picoprobe.
+# With a J-Link or ST-Link, override just this in your user config:
+#   [transports.openocd]
+#   probe = ["interface/jlink.cfg", { command = "transport select swd" }]
+probe = ["interface/cmsis-dap.cfg", { command = "transport select swd" }]
 
 [connection.probe-rs]
 chip = "RP235x"

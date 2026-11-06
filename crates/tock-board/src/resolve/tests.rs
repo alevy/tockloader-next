@@ -41,7 +41,13 @@ fn board_default_transport_and_options() {
     assert_eq!(ctx.board_file.source, Source::Project("Tock.toml".into()));
     assert_eq!(ctx.transport.name.value, "openocd");
     assert!(matches!(ctx.transport.name.source, Source::Board(_)));
-    assert!(ctx.transport.options.contains_key("config"));
+    // Both halves come from the board file: the chip, which is the same for
+    // everyone, and a probe default, which is only right until someone
+    // plugs in a different one.
+    for key in ["target", "probe", "page_size"] {
+        let option = ctx.transport.options.get(key).expect(key);
+        assert!(matches!(option.source, Source::Board(_)), "{key}");
+    }
 }
 
 #[test]

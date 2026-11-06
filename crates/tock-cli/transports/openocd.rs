@@ -222,16 +222,52 @@ impl Step {
     }
 }
 
-/// Read `config` into the ordered steps openocd will run.
+/// Read the config stage from the options.
 ///
-/// A bare string is a config file, which is the common case and stays
-/// terse. A table carries either `command` (TCL, run as given) or `file`
-/// (the long form of the string).
+/// Three keys, and the reason there are three is **ownership**:
+///
+/// - `target` is the chip -- its flash, its TAP. The board author knows it
+///   and it is the same for everyone, so it belongs in the board file.
+/// - `probe` is what is plugged into *this* machine, and which transport it
+///   speaks. Two developers with the same board may have a J-Link and an
+///   ST-Link, so it belongs in the user config.
+/// - `config` is both at once, for anything that does not decompose.
+///
+/// They are separate keys rather than one list because option layers merge
+/// per key: a board file can ship a sensible `probe` -- an onboard debugger,
+/// or the common external one -- and a developer with a different probe
+/// overrides that half without restating the chip.
+///
+/// `probe` runs first, which is also the only order openocd accepts.
 fn resolve_configs(options: &Options<'_>) -> Result<Vec<Step>, Failure> {
-    let Some(value) = options.get("config") else {
+    let split = ["probe", "target"];
+    if options.get("config").is_some() {
+        if let Some(key) = split.iter().find(|k| options.get(k).is_some()) {
+            return Err(Response::error(
+                ErrorKind::Selection,
+                format!("openocd `config` and `{key}` cannot both be set"),
+            )
+            .with_suggestion(
+                "`config` is the whole config stage; `probe` and `target` are its two \
+                 halves.\nUse one or the other.",
+            )
+            .into());
+        }
+        return steps(options, "config");
+    }
+    let mut out = steps(options, "probe")?;
+    out.extend(steps(options, "target")?);
+    Ok(out)
+}
+
+/// One key's worth of steps. A bare string is a config file, which is the
+/// common case and stays terse; a table carries either `command` (TCL, run
+/// as given) or `file` (the long form of the string).
+fn steps(options: &Options<'_>, key: &str) -> Result<Vec<Step>, Failure> {
+    let Some(value) = options.get(key) else {
         return Ok(Vec::new());
     };
-    let base = options.base_dir("config");
+    let base = options.base_dir(key);
     let entries: Vec<&serde_json::Value> = match value {
         serde_json::Value::Array(entries) => entries.iter().collect(),
         single => vec![single],
@@ -259,7 +295,7 @@ fn config_step(entry: &serde_json::Value, base: Option<&Path>) -> Result<Step, F
     // available. A typo should say it is a typo.
     Err(Response::error(
         ErrorKind::Selection,
-        format!("`config` entry {entry} is neither a path nor a command"),
+        format!("openocd config entry {entry} is neither a path nor a command"),
     )
     .with_suggestion(
         "a config file is a bare string: \"interface/cmsis-dap.cfg\"\n\
@@ -482,11 +518,12 @@ impl OpenocdTransport {
         if configs.is_empty() {
             return Err(Response::error(
                 ErrorKind::Selection,
-                "the openocd transport needs at least one openocd config file",
+                "the openocd transport has nothing to configure it with",
             )
             .with_suggestion(
-                "add --opt config=board/nordic_nrf52_dk.cfg\n\
-                 or give the board file a [connection.openocd] config = [...] entry",
+                "the board file should give [connection.openocd] a `target`\n\
+                 your user config should give it a `probe` for what you have plugged in,\n\
+                 e.g. [transports.openocd] probe = [\"interface/jlink.cfg\"]",
             )
             .into());
         }

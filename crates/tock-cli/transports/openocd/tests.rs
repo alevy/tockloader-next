@@ -103,7 +103,7 @@ fn config_entries_resolve_next_to_the_file_that_named_them() {
 }
 
 #[test]
-fn config_is_an_ordered_list_of_files_and_commands() {
+fn probe_and_target_are_two_halves_with_two_owners() {
     let bases = BTreeMap::new();
     let configs = |v: serde_json::Value| {
         let map = v.as_object().unwrap().clone();
@@ -112,51 +112,62 @@ fn config_is_an_ordered_list_of_files_and_commands() {
     let file = |p: &str| Step::File(p.into());
     let command = |c: &str| Step::Command(c.into());
 
-    // A bare string is a config file. One or many, as before.
+    // The whole point: the board file knows the chip, the user config knows
+    // what is plugged in, and they arrive as separate keys so neither has to
+    // restate the other. `probe` runs first -- the only order openocd takes.
     assert_eq!(
-        configs(serde_json::json!({"config": "a.cfg"})).unwrap(),
-        vec![file("a.cfg")]
+        configs(serde_json::json!({
+            "probe": ["interface/jlink.cfg", {"command": "transport select swd"}],
+            "target": ["target/nrf52.cfg"],
+        }))
+        .unwrap(),
+        vec![
+            file("interface/jlink.cfg"),
+            command("transport select swd"),
+            file("target/nrf52.cfg"),
+        ]
+    );
+
+    // Either half alone is fine: a board with no probe default, or a probe
+    // with no board yet.
+    assert_eq!(
+        configs(serde_json::json!({"target": "target/nrf52.cfg"})).unwrap(),
+        vec![file("target/nrf52.cfg")]
     );
     assert_eq!(
-        configs(serde_json::json!({"config": ["a.cfg", "b.cfg"]})).unwrap(),
-        vec![file("a.cfg"), file("b.cfg")]
+        configs(serde_json::json!({"probe": "interface/jlink.cfg"})).unwrap(),
+        vec![file("interface/jlink.cfg")]
     );
     assert!(configs(serde_json::json!({})).unwrap().is_empty());
 
-    // The point of the exercise: a command keeps its place between two
-    // files. `transport select` after the interface and before the target
-    // is the only order openocd accepts.
+    // `config` is the escape hatch for a board that does not decompose.
     assert_eq!(
-        configs(serde_json::json!({"config": [
-            "interface/cmsis-dap.cfg",
-            {"command": "transport select swd"},
-            "target/stm32wlx.cfg",
-        ]}))
-        .unwrap(),
-        vec![
-            file("interface/cmsis-dap.cfg"),
-            command("transport select swd"),
-            file("target/stm32wlx.cfg"),
-        ]
+        configs(serde_json::json!({"config": ["board/nordic_nrf52_dk.cfg"]})).unwrap(),
+        vec![file("board/nordic_nrf52_dk.cfg")]
     );
-    assert_eq!(
-        configs(serde_json::json!({"config": [{"file": "a.cfg"}]})).unwrap(),
-        vec![file("a.cfg")]
-    );
+    // But it is the whole stage, so mixing it with a half is a mistake we
+    // must not resolve by guessing which one the user meant.
+    let both = configs(serde_json::json!({
+        "config": ["board/nordic_nrf52_dk.cfg"],
+        "probe": ["interface/jlink.cfg"],
+    }));
+    assert!(both.is_err(), "config + probe was silently accepted");
 
     // And that is what openocd is told, in that order.
-    let steps = configs(serde_json::json!({"config": [
-        "a.cfg", {"command": "transport select swd"},
-    ]}))
+    let steps = configs(serde_json::json!({
+        "probe": ["a.cfg", {"command": "transport select swd"}],
+        "target": ["b.cfg"],
+    }))
     .unwrap();
     let args: Vec<&str> = steps.iter().flat_map(Step::args).collect();
-    assert_eq!(args, ["-f", "a.cfg", "-c", "transport select swd"]);
+    assert_eq!(
+        args,
+        ["-f", "a.cfg", "-c", "transport select swd", "-f", "b.cfg"]
+    );
 
-    // An entry we cannot read is an error, not a silent omission. Dropping
-    // it would leave openocd to fail later with something unrelated.
-    let bad = configs(serde_json::json!({"config": [{"comand": "typo"}]}));
-    assert!(bad.is_err(), "a misspelled key was accepted");
-    assert!(configs(serde_json::json!({"config": [42]})).is_err());
+    // An entry we cannot read is an error, not a silent omission.
+    assert!(configs(serde_json::json!({"target": [{"fle": "typo.cfg"}]})).is_err());
+    assert!(configs(serde_json::json!({"probe": [42]})).is_err());
 }
 
 /// openocd programs whatever address it is handed, so this check is the

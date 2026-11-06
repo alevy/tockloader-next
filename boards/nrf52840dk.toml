@@ -29,7 +29,14 @@ default = "openocd"
 [connection.openocd]
 # The erase unit, which only this transport needs to know.
 page_size = 4096
-config = ["board/nordic_nrf52_dk.cfg"]
+# `target` is the chip: the same for everyone with this board.
+target = ["target/nrf52.cfg"]
+# `probe` is what is plugged in. This board has a J-Link OB soldered on, so
+# this is right for almost everyone -- but if you debug it with an external
+# probe instead, override just this in your user config:
+#   [transports.openocd]
+#   probe = ["interface/cmsis-dap.cfg", { command = "transport select swd" }]
+probe = ["interface/jlink.cfg", { command = "transport select swd" }]
 
 [connection.probe-rs]
 chip = "nRF52840_xxAA"

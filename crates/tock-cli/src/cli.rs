@@ -32,7 +32,7 @@ pub(crate) struct Global {
     /// Transport to reach the board with (e.g. file, openocd).
     #[arg(long, global = true)]
     pub(crate) transport: Option<String>,
-    /// Device alias from the user config, or a transport-specific selector.
+    /// Named device from the user config: `[devices.<name>]`.
     #[arg(long, global = true)]
     pub(crate) device: Option<String>,
     /// Transport option, `key=value`. Repeatable.
