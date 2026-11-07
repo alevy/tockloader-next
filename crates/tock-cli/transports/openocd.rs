@@ -135,7 +135,7 @@ fn page_size_from(configured: Option<u64>) -> Result<u64, Response> {
         )
         .with_suggestion(
             "add --opt page_size=4096\n\
-             or give the board file a [connection.openocd] page_size entry",
+             or give the board file a [transports.openocd] page_size entry",
         )
     };
     match configured {
@@ -144,7 +144,7 @@ fn page_size_from(configured: Option<u64>) -> Result<u64, Response> {
             ErrorKind::Selection,
             format!("page_size {v} cannot be a flash erase unit: it must be a power of two"),
         )
-        .with_suggestion("check [connection.openocd] page_size, e.g. page_size = 4096")),
+        .with_suggestion("check [transports.openocd] page_size, e.g. page_size = 4096")),
         Some(v) => Ok(v),
     }
 }
@@ -521,7 +521,7 @@ impl OpenocdTransport {
                 "the openocd transport has nothing to configure it with",
             )
             .with_suggestion(
-                "the board file should give [connection.openocd] a `target`\n\
+                "the board file should give [transports.openocd] a `target`\n\
                  your user config should give it a `probe` for what you have plugged in,\n\
                  e.g. [transports.openocd] probe = [\"interface/jlink.cfg\"]",
             )

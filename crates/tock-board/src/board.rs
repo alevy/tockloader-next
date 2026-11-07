@@ -25,9 +25,11 @@ pub fn bundled(name: &str) -> Option<&'static str> {
 pub struct Board {
     pub board: BoardInfo,
     pub layout: Layout,
-    /// `default` names a transport; every other key is a transport's options.
+    /// Keyed by transport name, like the same table in a project file or a
+    /// user config: `[transports.openocd]`. Only the selected transport's
+    /// entry is consulted.
     #[serde(default)]
-    pub connection: toml::Table,
+    pub transports: toml::Table,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,6 +40,10 @@ pub struct BoardInfo {
     pub description: String,
     /// Architecture name used to pick TBFs from TABs.
     pub arch: String,
+    /// How this board is normally reached. A fact about the board, like its
+    /// architecture -- and the same key `Tock.toml` and the user config use,
+    /// either of which may override it.
+    pub transport: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -129,11 +135,11 @@ impl Board {
     }
 
     pub fn default_transport(&self) -> Option<&str> {
-        self.connection.get("default").and_then(|v| v.as_str())
+        self.board.transport.as_deref()
     }
 
     pub fn transport_options(&self, transport: &str) -> Option<&toml::Table> {
-        self.connection.get(transport).and_then(|v| v.as_table())
+        self.transports.get(transport).and_then(|v| v.as_table())
     }
 }
 

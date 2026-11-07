@@ -13,7 +13,7 @@
 //!
 //! Transport options layer per key, highest first: `--opt`, `TOCK_OPT_<KEY>`,
 //! device alias, `[transports.<name>]` in the project file,
-//! `[transports.<name>]` in the user config, `[connection.<name>]` in the
+//! `[transports.<name>]` in the user config, the same table in the
 //! board file.
 //!
 //! Every resolved value carries its [`Source`], so `tock config show` can

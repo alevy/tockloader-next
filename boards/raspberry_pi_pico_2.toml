@@ -9,6 +9,9 @@ name = "raspberry_pi_pico_2"
 description = "Raspberry Pi Pico 2"
 # Tock builds Cortex-M33 apps as cortex-m4 TBFs today.
 arch = "cortex-m4"
+# How this board is normally reached; override with --transport, or in
+# Tock.toml or your user config.
+transport = "openocd"
 
 [layout]
 flash = { start = 0x1000_0000, size = "4M" }
@@ -24,10 +27,7 @@ order = "size_descending"
 size = "power_of_two"
 alignment = "size"
 
-[connection]
-default = "openocd"
-
-[connection.openocd]
+[transports.openocd]
 # The erase unit, which only this transport needs to know.
 page_size = 4096
 # Needs an openocd that knows RP2350: 0.13 or Raspberry Pi's fork. 0.12
@@ -40,5 +40,5 @@ target = ["target/rp2350.cfg"]
 #   probe = ["interface/jlink.cfg", { command = "transport select swd" }]
 probe = ["interface/cmsis-dap.cfg", { command = "transport select swd" }]
 
-[connection.probe-rs]
+[transports.probe-rs]
 chip = "RP235x"

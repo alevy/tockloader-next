@@ -28,7 +28,7 @@ pub enum Error {
     ExtendsLoop(String),
     #[error("no board selected")]
     NoBoard,
-    #[error("no transport selected and board `{0}` has no [connection] default")]
+    #[error("no transport selected and board `{0}` does not name one")]
     NoTransport(String),
     #[error("{0}")]
     Invalid(String),

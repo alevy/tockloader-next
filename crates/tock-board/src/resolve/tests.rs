@@ -304,6 +304,7 @@ fn board_files_use_snake_case_keys_and_values() {
         [board]
         name = "snake"
         arch = "cortex-m4"
+        transport = "probe-rs"
         [layout]
         flash = { start = 0, size = "1M" }
         kernel = { start = 0, size = "256K" }
@@ -312,9 +313,7 @@ fn board_files_use_snake_case_keys_and_values() {
         [layout.placement]
         order = "size_descending"
         size = "power_of_two"
-        [connection]
-        default = "probe-rs"
-        [connection.probe-rs]
+        [transports.probe-rs]
         chip = "X"
         "#,
     )]);

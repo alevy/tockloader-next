@@ -8,6 +8,9 @@
 name = "nrf52840dk"
 description = "Nordic nRF52840 DK"
 arch = "cortex-m4"
+# How this board is normally reached; override with --transport, or in
+# Tock.toml or your user config.
+transport = "openocd"
 
 [layout]
 flash = { start = 0x0000_0000, size = "1M" }
@@ -23,10 +26,7 @@ order = "size_descending"
 size = "power_of_two"
 alignment = "size"
 
-[connection]
-default = "openocd"
-
-[connection.openocd]
+[transports.openocd]
 # The erase unit, which only this transport needs to know.
 page_size = 4096
 # `target` is the chip: the same for everyone with this board.
@@ -38,10 +38,10 @@ target = ["target/nrf52.cfg"]
 #   probe = ["interface/cmsis-dap.cfg", { command = "transport select swd" }]
 probe = ["interface/jlink.cfg", { command = "transport select swd" }]
 
-[connection.probe-rs]
+[transports.probe-rs]
 chip = "nRF52840_xxAA"
 
 # Handled by an external transport plugin (tock-transport-jlink).
-[connection.jlink]
+[transports.jlink]
 device = "nrf52840_xxAA"
 speed = 1200
