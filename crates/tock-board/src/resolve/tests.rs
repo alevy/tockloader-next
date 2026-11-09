@@ -82,9 +82,10 @@ fn precedence_flag_over_alias_over_project_over_user() {
     // The alias beats the project file.
     assert_eq!(ctx.transport.name.value, "jlink");
     assert_eq!(ctx.transport.name.source, Source::Device("lab".into()));
-    // Board < user < alias for options.
+    // Board < user < alias for options. `chip` is supplied only by the board
+    // file, so its source proves the board layer reached the resolved set.
     assert_eq!(
-        ctx.transport.options["device"].source,
+        ctx.transport.options["chip"].source,
         Source::Board("bundled:nrf52840dk".into())
     );
     assert_eq!(
