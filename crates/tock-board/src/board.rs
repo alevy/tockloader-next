@@ -22,8 +22,10 @@ pub fn bundled(name: &str) -> Option<&'static str> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct Board {
-    pub board: BoardInfo,
+pub struct BoardFile {
+    /// The `[board]` section: what this board is called and what it is.
+    #[serde(rename = "board")]
+    pub info: BoardInfo,
     pub layout: Layout,
     /// Keyed by transport name, like the same table in a project file or a
     /// user config: `[transports.openocd]`. Only the selected transport's
@@ -69,7 +71,7 @@ pub struct Range {
     pub size: Size,
 }
 
-impl Board {
+impl BoardFile {
     /// Load a board by bundled name or by path. A reference is a path if it
     /// contains `/` or ends in `.toml`; otherwise it must be a bundled name.
     /// There is no fallback from one to the other.
@@ -80,20 +82,21 @@ impl Board {
         reference: &str,
         relative_to: Option<&str>,
         files: &dyn FileSource,
-    ) -> Result<(Board, String), Error> {
+    ) -> Result<(BoardFile, String), Error> {
         let (origin, table) = load_merged(reference, relative_to, files, 0)?;
-        let board: Board = toml::Value::Table(table)
-            .try_into()
-            .map_err(|e: toml::de::Error| Error::Parse {
-                origin: origin.clone(),
-                message: e.to_string(),
-            })?;
+        let board: BoardFile =
+            toml::Value::Table(table)
+                .try_into()
+                .map_err(|e: toml::de::Error| Error::Parse {
+                    origin: origin.clone(),
+                    message: e.to_string(),
+                })?;
         board.validate(&origin)?;
         Ok((board, origin))
     }
 
-    pub fn parse(origin: &str, text: &str) -> Result<Board, Error> {
-        let board: Board = toml::from_str(text).map_err(|e| Error::Parse {
+    pub fn parse(origin: &str, text: &str) -> Result<BoardFile, Error> {
+        let board: BoardFile = toml::from_str(text).map_err(|e| Error::Parse {
             origin: origin.into(),
             message: e.to_string(),
         })?;
@@ -135,7 +138,7 @@ impl Board {
     }
 
     pub fn default_transport(&self) -> Option<&str> {
-        self.board.transport.as_deref()
+        self.info.transport.as_deref()
     }
 
     pub fn transport_options(&self, transport: &str) -> Option<&toml::Table> {

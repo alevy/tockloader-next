@@ -21,7 +21,7 @@ mod error;
 use std::os::fd::FromRawFd;
 use std::process::{Command, Stdio};
 
-use tock_board::Resolved;
+use tock_board::Context;
 
 use tock_proto::{Client, Connection, ErrorKind, ProtoError, Request, Response, StreamChannel};
 
@@ -133,7 +133,7 @@ impl<R: std::io::Read, W: std::io::Write> Drop for Spawned<R, W> {
 ///
 /// `TOCK_CONTEXT_ERROR` is set instead when resolution failed -- a subcommand
 /// that does not need a board can ignore both.
-pub fn context() -> Result<Resolved, CliError> {
+pub fn context() -> Result<Context, CliError> {
     if let Ok(why) = std::env::var("TOCK_CONTEXT_ERROR") {
         return Err(inherited_error(&why));
     }

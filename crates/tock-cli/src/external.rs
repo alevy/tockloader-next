@@ -12,11 +12,11 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
-use tock_board::Resolved;
+use tock_board::Context;
 
 use crate::broker::Broker;
 use crate::cli::Global;
-use crate::config::{load_context, project_apps};
+use crate::config::{load_settings, project_apps};
 use tock_client::{CliError, Code};
 
 /// Every directory we look in, in the order we look.
@@ -66,7 +66,7 @@ pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
 /// `tock foo ...` runs `tock-foo ...`.
 ///
 /// The subcommand inherits two things. `TOCK_CONTEXT` is a
-/// [`Resolved`](tock_board::Resolved) document in JSON: the board, where apps
+/// [`Context`](tock_board::Context) document in JSON: the board, where apps
 /// go, how to place them, and the project's declared TABs -- everything
 /// needed to plan, and nothing about how a connection would be made.
 /// `TOCK_BOARD`, `TOCK_TRANSPORT` and `TOCK_DEVICE` carry the global flags
@@ -87,9 +87,9 @@ pub(crate) fn external(g: &Global, args: Vec<String>) -> Result<(), CliError> {
     })?;
     let mut cmd = std::process::Command::new(path);
     cmd.args(&args[1..]);
-    match load_context(g).and_then(|ctx| Ok(Resolved::new(&ctx, project_apps()?))) {
-        Ok(resolved) => {
-            cmd.env("TOCK_CONTEXT", serde_json::to_string(&resolved).unwrap());
+    match load_settings(g).and_then(|s| Ok(Context::new(&s, project_apps()?))) {
+        Ok(context) => {
+            cmd.env("TOCK_CONTEXT", serde_json::to_string(&context).unwrap());
         }
         Err(e) => {
             // The whole error, not just its message: a subcommand reporting
@@ -141,12 +141,12 @@ pub(crate) fn external(g: &Global, args: Vec<String>) -> Result<(), CliError> {
 
     // Answer the child until it stops asking. Nothing is opened unless it
     // asks for something that needs a device.
-    if let Ok(context) = load_context(g) {
+    if let Ok(settings) = load_settings(g) {
         let reader = ours
             .try_clone()
             .map_err(|e| CliError::new(Code::Failed, format!("{exe}: {e}")))?;
         let mut broker =
-            crate::broker::watched(Broker::new(context, g.trace_protocol), g.trace_protocol);
+            crate::broker::watched(Broker::new(settings, g.trace_protocol), g.trace_protocol);
         let _ = tock_proto::serve(reader, ours, &mut broker);
     }
 

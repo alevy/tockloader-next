@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use tock_board::Resolved;
+use tock_board::Context;
 use tock_client::{CliError, Code, connect, context, finish};
-use tock_image::{NewApp, Request};
+use tock_image::{Change, NewApp};
 
 #[path = "apps.rs"]
 mod apps;
@@ -35,9 +35,9 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &Args) -> Result<(), CliError> {
-    let board = context()?;
+    let ctx = context()?;
     let tabs = if args.tabs.is_empty() {
-        if board.project_apps.is_empty() {
+        if ctx.project_apps.is_empty() {
             return Err(CliError::new(
                 Code::Failed,
                 "no TABs given and no [[app]] entries in a Tock.toml",
@@ -45,17 +45,17 @@ fn run(args: &Args) -> Result<(), CliError> {
             .hint("tock install path/to/app.tab")
             .hint("or list apps in Tock.toml: [[app]] tab = \"build/app.tab\""));
         }
-        board.project_apps.clone()
+        ctx.project_apps.clone()
     } else {
         args.tabs.clone()
     };
 
     let install = tabs
         .iter()
-        .map(|tab| load_tab(&board, tab))
+        .map(|tab| load_tab(&ctx, tab))
         .collect::<Result<Vec<NewApp>, _>>()?;
 
-    let request = Request {
+    let change = Change {
         install,
         uninstall: vec![],
         allow_repack: args.allow_repack,
@@ -63,7 +63,7 @@ fn run(args: &Args) -> Result<(), CliError> {
     };
 
     let mut device = connect()?;
-    apps::apply(&mut device, &board, &request, args.dry_run)?.report(args.dry_run);
+    apps::apply(&mut device, &ctx, &change, args.dry_run)?.report(args.dry_run);
     Ok(())
 }
 
@@ -71,14 +71,14 @@ fn run(args: &Args) -> Result<(), CliError> {
 ///
 /// Here rather than in the shared module because `install` is the only
 /// command that reads one: `uninstall` takes names and `list` takes nothing.
-fn load_tab(board: &Resolved, path: &Path) -> Result<NewApp, CliError> {
+fn load_tab(ctx: &Context, path: &Path) -> Result<NewApp, CliError> {
     let shown = path.display();
     let bytes =
         std::fs::read(path).map_err(|e| CliError::new(Code::Failed, format!("{shown}: {e}")))?;
     let tab = tbf::Tab::parse(&bytes)
         .map_err(|e| CliError::new(Code::Failed, format!("{shown}: {e}")))?;
     if let Some(only) = tab.only_for_boards() {
-        if !only.contains(&board.board) {
+        if !only.contains(&ctx.board.name) {
             return Err(CliError::new(
                 Code::Failed,
                 format!("{shown} is only for boards: {}", only.join(", ")),
@@ -86,14 +86,14 @@ fn load_tab(board: &Resolved, path: &Path) -> Result<NewApp, CliError> {
         }
     }
     let tbfs = tab
-        .tbfs_for_arch(&board.arch)
+        .tbfs_for_arch(&ctx.board.arch)
         .map_err(|e| CliError::new(Code::Failed, format!("{shown}: {e}")))?;
     if tbfs.is_empty() {
         return Err(CliError::new(
             Code::Failed,
             format!(
                 "{shown} has no build for `{}` (it has: {})",
-                board.arch,
+                ctx.board.arch,
                 tab.architectures().join(", ")
             ),
         ));

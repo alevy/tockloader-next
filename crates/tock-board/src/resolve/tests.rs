@@ -37,7 +37,7 @@ fn board_default_transport_and_options() {
         &Files(vec![]),
     )
     .unwrap();
-    assert_eq!(ctx.board.board.name, "nrf52840dk");
+    assert_eq!(ctx.board.info.name, "nrf52840dk");
     assert_eq!(ctx.board_file.source, Source::Project("Tock.toml".into()));
     assert_eq!(ctx.transport.name.value, "openocd");
     assert!(matches!(ctx.transport.name.source, Source::Board(_)));
@@ -235,8 +235,8 @@ fn extends_overrides_one_field() {
         ..Default::default()
     };
     let ctx = resolve(&inputs(flags, None, None), &files).unwrap();
-    assert_eq!(ctx.board.board.name, "acme");
-    assert_eq!(ctx.board.board.arch, "cortex-m4");
+    assert_eq!(ctx.board.info.name, "acme");
+    assert_eq!(ctx.board.info.arch, "cortex-m4");
     assert_eq!(ctx.board.app_region().start, 0x50000);
     // Inherited from the base board, not restated by the override.
     assert_eq!(ctx.board.layout.flash.size.0, 1024 * 1024);
@@ -255,13 +255,13 @@ fn the_exported_document_round_trips_and_carries_no_transport_detail() {
         &Files(vec![]),
     )
     .unwrap();
-    let exported = Resolved::new(&ctx, vec![PathBuf::from("/repo/blink.tab")]);
+    let exported = Context::new(&ctx, vec![PathBuf::from("/repo/blink.tab")]);
     let json = serde_json::to_string(&exported).unwrap();
 
     // What a client plans with survives the trip.
-    let back: Resolved = serde_json::from_str(&json).unwrap();
-    assert_eq!(back.board, "nrf52840dk");
-    assert_eq!(back.arch, "cortex-m4");
+    let back: Context = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.board.name, "nrf52840dk");
+    assert_eq!(back.board.arch, "cortex-m4");
     assert_eq!(back.apps, ctx.board.app_region());
     assert_eq!(back.project_apps, vec![PathBuf::from("/repo/blink.tab")]);
 
@@ -341,7 +341,7 @@ fn board_files_no_longer_carry_a_page_size() {
         apps = { start = 0x40000, size = "768K" }
     "#;
     // Loud, not ignored: someone still believes that number means something.
-    let err = Board::parse("x.toml", stale).unwrap_err().to_string();
+    let err = BoardFile::parse("x.toml", stale).unwrap_err().to_string();
     assert!(err.contains("page_size"), "{err}");
 }
 
@@ -356,7 +356,7 @@ fn an_unaligned_app_region_is_the_kernels_business() {
         kernel = { start = 0, size = "256K" }
         apps = { start = 0x40010, size = "700K" }
     "#;
-    assert!(Board::parse("x.toml", odd).is_ok());
+    assert!(BoardFile::parse("x.toml", odd).is_ok());
 }
 
 #[test]
@@ -370,6 +370,6 @@ fn layout_is_validated() {
         kernel = { start = 0, size = "256K" }
         apps = { start = 0x20000, size = "128K" }
     "#;
-    let err = Board::parse("x.toml", bad).unwrap_err().to_string();
+    let err = BoardFile::parse("x.toml", bad).unwrap_err().to_string();
     assert!(err.contains("overlaps layout.kernel"), "{err}");
 }

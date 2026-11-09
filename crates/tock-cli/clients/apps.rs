@@ -19,10 +19,10 @@
 //! uses part, so unused warnings here are expected rather than a signal.
 #![allow(dead_code)]
 
-use tock_board::Resolved;
+use tock_board::Context;
 use tock_client::{CliError, Code, proto};
-use tock_image::{Discovered, Flash, NeedRead, Plan, PlanError, Request, WriteRun};
-use tock_proto::{Capability, Client, Request as Rq};
+use tock_image::{Change, Discovered, Flash, NeedRead, Plan, PlanError, WriteRun};
+use tock_proto::{Capability, Client, Request};
 
 /// How far apart two reads may be before issuing them separately beats
 /// reading the bytes between them.
@@ -69,25 +69,25 @@ pub fn with_reads<T>(
 /// [`tock_image::discover`] is the verb and this calls it. What it adds is
 /// everything that is not the walk: the capability check, the region, and
 /// the bytes.
-pub fn installed(device: &mut Client, board: &Resolved) -> Result<(Flash, Discovered), CliError> {
+pub fn installed(device: &mut Client, ctx: &Context) -> Result<(Flash, Discovered), CliError> {
     device
         .require(Capability::MemoryRead, "reading apps")
         .map_err(proto)?;
-    let mut flash = Flash::new(&board.apps);
-    let found = with_reads(device, &mut flash, |f| tock_image::discover(&board.apps, f))?;
+    let mut flash = Flash::new(&ctx.apps);
+    let found = with_reads(device, &mut flash, |f| tock_image::discover(&ctx.apps, f))?;
     Ok((flash, found))
 }
 
 /// Plan a change, make the device match, and check that it did.
 ///
 /// The whole of what `install` and `uninstall` have in common. They differ
-/// only in the [`Request`] they build and the arguments they parse;
+/// only in the [`Change`] they build and the arguments they parse;
 /// everything from here is the same work, and sharing it is what keeps two
 /// separate binaries behaving like one tool.
 pub fn apply(
     device: &mut Client,
-    board: &Resolved,
-    request: &Request,
+    ctx: &Context,
+    change: &Change,
     dry_run: bool,
 ) -> Result<Applied, CliError> {
     if !dry_run {
@@ -95,12 +95,12 @@ pub fn apply(
             .require(Capability::MemoryWrite, "changing apps")
             .map_err(proto)?;
     }
-    let (mut flash, found) = installed(device, board)?;
-    let app_ram = board.app_ram.map(|r| (r.start, r.size));
-    let plan = tock_image::plan(&board.apps, &board.placement, app_ram, &found, request)
-        .map_err(plan_error)?;
+    let (mut flash, found) = installed(device, ctx)?;
+    let app_ram = ctx.app_ram.map(|r| (r.start, r.size));
+    let plan =
+        tock_image::plan(&ctx.apps, &ctx.placement, app_ram, &found, change).map_err(plan_error)?;
     let writes = with_reads(device, &mut flash, |f| {
-        tock_image::render(&board.apps, &plan, f, WRITE_GAP)
+        tock_image::render(&ctx.apps, &plan, f, WRITE_GAP)
     })?;
     if !dry_run {
         write_runs(device, &writes)?;
@@ -116,7 +116,7 @@ fn write_runs(device: &mut Client, runs: &[WriteRun]) -> Result<(), CliError> {
     for run in runs {
         device
             .call(
-                Rq::Write {
+                Request::Write {
                     address: run.address,
                 },
                 run.data.clone(),

@@ -14,33 +14,35 @@ use tock_proto::{Client, Connection, ProtoError, Request, Response};
 use tock_client::{CliError, Code};
 
 use crate::cli::Global;
-use crate::config::load_context;
-use crate::device;
+use crate::config::load_settings;
+use crate::connection;
 
 pub(crate) struct Broker {
-    context: tock_board::Context,
+    settings: tock_board::Settings,
     trace: bool,
-    device: Option<Client>,
+    /// The connection to the transport, opened on demand. Not the device
+    /// itself -- this is the wire to it.
+    link: Option<Client>,
 }
 
 impl Broker {
-    pub(crate) fn new(context: tock_board::Context, trace: bool) -> Broker {
+    pub(crate) fn new(settings: tock_board::Settings, trace: bool) -> Broker {
         Broker {
-            context,
+            settings,
             trace,
-            device: None,
+            link: None,
         }
     }
 
     /// Open on demand. A failure to open is fatal to the connection -- there
     /// will never be a device -- so it travels as an error rather than a
     /// response, carrying whatever the CLI would have told the user.
-    fn device(&mut self) -> Result<&mut Client, ProtoError> {
-        if self.device.is_none() {
-            let opened = device::open(&self.context, self.trace).map_err(fatal)?;
-            self.device = Some(opened);
+    fn link(&mut self) -> Result<&mut Client, ProtoError> {
+        if self.link.is_none() {
+            let opened = connection::open(&self.settings, self.trace).map_err(fatal)?;
+            self.link = Some(opened);
         }
-        Ok(self.device.as_mut().expect("just opened"))
+        Ok(self.link.as_mut().expect("just opened"))
     }
 }
 
@@ -68,13 +70,13 @@ impl Connection for Broker {
             // Answered here: the client did not open this transport and does
             // not get to say when it closes.
             Request::Hello { .. } => {
-                let device = self.device()?;
+                let link = self.link()?;
                 Ok((
                     Response::Hello {
                         protocol: tock_proto::PROTOCOL_VERSION,
-                        transport: device.transport.clone(),
+                        transport: link.transport.clone(),
                         version: env!("CARGO_PKG_VERSION").into(),
-                        capabilities: device.capabilities.clone(),
+                        capabilities: link.capabilities.clone(),
                     },
                     vec![],
                 ))
@@ -83,7 +85,7 @@ impl Connection for Broker {
             // The raw connection, not `Client::call`: a relay must hand a
             // refusal back as the refusal it is, rather than adopt it as its
             // own failure and hang up.
-            other => self.device()?.connection.call(other, payload),
+            other => self.link()?.connection.call(other, payload),
         }
     }
 }
@@ -92,7 +94,7 @@ impl Connection for Broker {
 /// `tock` and so has no inherited connection.
 pub(crate) fn broker(g: &Global) -> Result<(), CliError> {
     let mut broker = watched(
-        Broker::new(load_context(g)?, g.trace_protocol),
+        Broker::new(load_settings(g)?, g.trace_protocol),
         g.trace_protocol,
     );
     tock_proto::serve(
