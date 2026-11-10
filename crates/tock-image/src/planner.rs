@@ -24,12 +24,12 @@ impl NewApp {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct Request {
+pub struct Change {
     /// Apps to add. An installed app with the same name is replaced.
     pub install: Vec<NewApp>,
     /// Names of apps to remove.
     pub uninstall: Vec<String>,
-    /// Allow moving apps the request did not mention, laying out the whole
+    /// Allow moving apps the change did not name, laying out the whole
     /// region from scratch like Python tockloader does.
     pub allow_repack: bool,
     /// Allow removing or replacing sticky apps.
@@ -264,7 +264,7 @@ impl Pending {
 
 /// Decide where every app goes.
 ///
-/// By default apps the request does not mention stay exactly where they are:
+/// By default apps the change does not name stay exactly where they are:
 /// new and replaced apps go into gaps (including space freed by removed apps)
 /// or after the last app. With `allow_repack` the whole region is laid out
 /// again with Python tockloader's algorithm, which may move apps.
@@ -276,15 +276,15 @@ pub fn plan(
     placement: &Placement,
     app_ram: Option<(u64, u64)>,
     found: &Discovered,
-    request: &Request,
+    change: &Change,
 ) -> Result<Plan, PlanError> {
-    if request.install.is_empty() && request.uninstall.is_empty() {
+    if change.install.is_empty() && change.uninstall.is_empty() {
         return Err(PlanError::NothingToDo);
     }
     let installed: Vec<(u64, &Header)> = found.apps().collect();
     let name_of = |h: &Header| h.package_name().unwrap_or("").to_string();
 
-    for name in &request.uninstall {
+    for name in &change.uninstall {
         if !installed
             .iter()
             .any(|(_, h)| h.package_name() == Some(name))
@@ -297,7 +297,7 @@ pub fn plan(
     }
 
     let mut install: Vec<NewApp> = Vec::new();
-    for app in &request.install {
+    for app in &change.install {
         install.push(prepare(app, placement, app_ram)?);
     }
 
@@ -308,8 +308,8 @@ pub fn plan(
     for (address, header) in &installed {
         let name = name_of(header);
         let replacement = install.iter().position(|a| a.name == name);
-        let removing = request.uninstall.contains(&name);
-        if (replacement.is_some() || removing) && header.is_sticky() && !request.include_sticky {
+        let removing = change.uninstall.contains(&name);
+        if (replacement.is_some() || removing) && header.is_sticky() && !change.include_sticky {
             return Err(PlanError::Sticky { name });
         }
         if let Some(i) = replacement {
@@ -335,7 +335,7 @@ pub fn plan(
         replaces: None,
     }));
 
-    let placed = if request.allow_repack {
+    let placed = if change.allow_repack {
         place_repack(region, placement, pending)?
     } else {
         place_stable(region, placement, pending)?

@@ -1,5 +1,5 @@
 //! Board files, project files, user config, and resolving them into one
-//! [`Context`] that records where every value came from.
+//! [`Settings`] that records where every value came from.
 //!
 //! No I/O: files are loaded by the caller through [`FileSource`], so this
 //! builds for WASM and WASI.
@@ -9,10 +9,11 @@ mod config;
 mod resolve;
 mod size;
 
-pub use board::{BUNDLED, Board, BoardInfo, Layout, Range, bundled};
+pub use board::{BUNDLED, BoardFile, BoardInfo, Layout, Range, bundled};
 pub use config::{DeviceAlias, ProjectApp, ProjectFile, ProjectKernel, UserConfig};
 pub use resolve::{
-    Context, Inputs, Layer, Resolved, Source, Sourced, TransportContext, env_option_key, resolve,
+    Board, Context, Inputs, Layer, Settings, Source, Sourced, TransportContext, env_option_key,
+    resolve,
 };
 pub use size::Size;
 

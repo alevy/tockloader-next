@@ -1,5 +1,5 @@
 //! Combine flags, environment, project file, user config and board file into
-//! one [`Context`].
+//! one [`Settings`].
 //!
 //! Precedence, highest first, for each setting:
 //!
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use tock_image::{Placement, Region};
 
-use crate::{Board, Error, FileSource, ProjectFile, UserConfig};
+use crate::{BoardFile, Error, FileSource, ProjectFile, UserConfig};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "from", content = "at", rename_all = "snake_case")]
@@ -83,10 +83,10 @@ pub struct TransportContext {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct Context {
+pub struct Settings {
     /// Where the board definition was loaded from.
     pub board_file: Sourced<String>,
-    pub board: Board,
+    pub board: BoardFile,
     pub transport: TransportContext,
     pub device: Option<Sourced<String>>,
     pub project: Option<String>,
@@ -96,7 +96,7 @@ pub struct Context {
     pub user: Option<String>,
 }
 
-impl Context {
+impl Settings {
     /// Transport options as a plain table, for handing to a transport.
     pub fn transport_options(&self) -> toml::Table {
         self.transport
@@ -146,18 +146,29 @@ impl Context {
     }
 }
 
+/// What a subcommand is told about the board itself. A struct rather than
+/// bare fields so more can be said about a board later without changing the
+/// shape of everything around it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Board {
+    pub name: String,
+    /// The TBF architecture tag used to pick builds out of a TAB. A build
+    /// convention, not the chip's ISA: a Cortex-M33 board whose apps are
+    /// built by elf2tab as `cortex-m4` says `cortex-m4` here.
+    pub arch: String,
+}
+
 /// What `tock` hands a subcommand, as JSON in `TOCK_CONTEXT`.
 ///
-/// Deliberately narrower than [`Context`]: everything a client needs to plan
+/// Deliberately narrower than [`Settings`]: everything a client needs to plan
 /// against this board, and nothing about how the connection was made. A
 /// client never opens a transport -- it reaches the device through
 /// `tock broker` -- so transport names, options and their provenance are none
 /// of its business, and leaving them out keeps this a contract we can keep
-/// rather than a dump of whatever `Context` happens to hold.
+/// rather than a dump of whatever `Settings` happens to hold.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Resolved {
-    pub board: String,
-    pub arch: String,
+pub struct Context {
+    pub board: Board,
     /// Where apps live, and the rules for placing them there.
     pub apps: Region,
     pub placement: Placement,
@@ -170,16 +181,18 @@ pub struct Resolved {
     pub project_apps: Vec<PathBuf>,
 }
 
-impl Resolved {
-    pub fn new(context: &Context, project_apps: Vec<PathBuf>) -> Resolved {
-        Resolved {
-            board: context.board.board.name.clone(),
-            arch: context.board.board.arch.clone(),
-            apps: context.board.app_region(),
-            placement: context.board.layout.placement.clone(),
+impl Context {
+    pub fn new(settings: &Settings, project_apps: Vec<PathBuf>) -> Context {
+        Context {
+            board: Board {
+                name: settings.board.info.name.clone(),
+                arch: settings.board.info.arch.clone(),
+            },
+            apps: settings.board.app_region(),
+            placement: settings.board.layout.placement.clone(),
             // As a Region, not the bare tuple the planner takes: `[start,
             // size]` in JSON is a worse contract than named fields.
-            app_ram: context
+            app_ram: settings
                 .board
                 .app_ram()
                 .map(|(start, size)| Region { start, size }),
@@ -188,7 +201,7 @@ impl Resolved {
     }
 }
 
-pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Context, Error> {
+pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Error> {
     let project = inputs.project.as_ref();
     let user = inputs.user.as_ref();
 
@@ -235,7 +248,7 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Context, Error
         Source::User(origin) => Some(origin.as_str()),
         _ => None,
     };
-    let (board, board_origin) = Board::load(&board_ref.value, relative_to, files)?;
+    let (board, board_origin) = BoardFile::load(&board_ref.value, relative_to, files)?;
 
     let transport = pick(&[
         (
@@ -261,7 +274,7 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Context, Error
             source: Source::Board(board_origin.clone()),
         })
     })
-    .ok_or_else(|| Error::NoTransport(board.board.name.clone()))?;
+    .ok_or_else(|| Error::NoTransport(board.info.name.clone()))?;
 
     // Options, lowest precedence first so later layers overwrite.
     let mut options = BTreeMap::new();
@@ -311,7 +324,7 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Context, Error
         );
     }
 
-    Ok(Context {
+    Ok(Settings {
         board_file: Sourced {
             value: board_origin,
             source: board_ref.source,

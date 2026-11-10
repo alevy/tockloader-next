@@ -27,9 +27,9 @@ fn main() -> ExitCode {
 }
 
 fn run(json: bool) -> Result<(), CliError> {
-    let board = context()?;
+    let ctx = context()?;
     let mut device = connect()?;
-    let (_, found) = apps::installed(&mut device, &board)?;
+    let (_, found) = apps::installed(&mut device, &ctx)?;
 
     let apps: Vec<_> = found
         .apps()
@@ -51,9 +51,9 @@ fn run(json: bool) -> Result<(), CliError> {
         println!(
             "{}",
             serde_json::json!({
-                "board": board.board,
+                "board": ctx.board.name,
                 "apps": apps,
-                "end": found.end(&board.apps),
+                "end": found.end(&ctx.apps),
             })
         );
         return Ok(());

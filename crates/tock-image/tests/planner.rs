@@ -54,7 +54,7 @@ impl Board {
         tock_image::testing::loaded(&self.region, self.region.start, &self.image)
     }
 
-    fn apply(&mut self, req: Request) -> Result<(Plan, Vec<WriteRun>), PlanError> {
+    fn apply(&mut self, req: Change) -> Result<(Plan, Vec<WriteRun>), PlanError> {
         let flash = self.flash();
         let found = discover(&self.region, &flash).unwrap();
         let plan = plan(&self.region, &self.placement, None, &found, &req)?;
@@ -96,8 +96,8 @@ impl Board {
     }
 }
 
-fn install(names: &[(&str, u32)]) -> Request {
-    Request {
+fn install(names: &[(&str, u32)]) -> Change {
+    Change {
         install: names.iter().map(|(n, s)| new_app(n, *s)).collect(),
         ..Default::default()
     }
@@ -161,7 +161,7 @@ fn uninstall_leaves_others_in_place_and_gap_is_reused() {
         .unwrap();
     let before = b.apps();
     let (_, writes) = b
-        .apply(Request {
+        .apply(Change {
             uninstall: vec!["b".into()],
             ..Default::default()
         })
@@ -184,7 +184,7 @@ fn removing_the_last_app_ends_the_list() {
     let mut b = Board::new(cortex_m());
     b.apply(install(&[("a", 8000), ("b", 4000)])).unwrap();
     let (plan, _) = b
-        .apply(Request {
+        .apply(Change {
             uninstall: vec!["b".into()],
             ..Default::default()
         })
@@ -216,7 +216,7 @@ fn repack_is_opt_in() {
     let k = |n: u64| (n * KB) as u32;
     b.apply(install(&[("a", k(100)), ("b", k(100)), ("c", k(50))]))
         .unwrap();
-    b.apply(Request {
+    b.apply(Change {
         uninstall: vec!["a".into(), "c".into()],
         ..Default::default()
     })
@@ -231,7 +231,7 @@ fn repack_is_opt_in() {
         }
     );
 
-    let req = Request {
+    let req = Change {
         allow_repack: true,
         ..install(&[("d", k(120))])
     };
@@ -255,7 +255,7 @@ fn repack_is_opt_in() {
         &app("b", k(100), k(50), None).to_bytes(0xFF)[16..64]
     );
 
-    let req = Request {
+    let req = Change {
         allow_repack: true,
         ..install(&[("e", k(200))])
     };
@@ -266,7 +266,7 @@ fn repack_is_opt_in() {
 fn repack_moves_apps_like_python() {
     let mut b = Board::new(cortex_m());
     b.apply(install(&[("small", 2000)])).unwrap();
-    let req = Request {
+    let req = Change {
         allow_repack: true,
         ..install(&[("big", 30000)])
     };
@@ -292,13 +292,13 @@ fn sticky_apps_need_explicit_opt_in() {
     let mut b = Board::new(cortex_m());
     let mut a = new_app("keep", 4000);
     a.candidates[0].header.flags |= tbf::FLAG_STICKY;
-    b.apply(Request {
+    b.apply(Change {
         install: vec![a],
         ..Default::default()
     })
     .unwrap();
     let err = b
-        .apply(Request {
+        .apply(Change {
             uninstall: vec!["keep".into()],
             ..Default::default()
         })
@@ -309,7 +309,7 @@ fn sticky_apps_need_explicit_opt_in() {
             name: "keep".into()
         }
     );
-    b.apply(Request {
+    b.apply(Change {
         uninstall: vec!["keep".into()],
         include_sticky: true,
         ..Default::default()
@@ -323,7 +323,7 @@ fn unknown_app_lists_installed() {
     let mut b = Board::new(cortex_m());
     b.apply(install(&[("a", 1000)])).unwrap();
     let err = b
-        .apply(Request {
+        .apply(Change {
             uninstall: vec!["nope".into()],
             ..Default::default()
         })
@@ -345,7 +345,7 @@ fn fixed_address_apps_pick_a_matching_build() {
         app("fx", 4096, 1000, Some((0x2000_8000, 0x30080))),
         app("fx", 4096, 1000, Some((0x2000_8000, 0x48080))),
     ];
-    b.apply(Request {
+    b.apply(Change {
         install: vec![NewApp {
             name: "fx".into(),
             candidates,
@@ -374,7 +374,7 @@ fn fixed_and_pic_apps_can_mix() {
         name: "fx".into(),
         candidates: vec![app("fx", 4096, 1000, Some((0, 0x41080)))],
     };
-    b.apply(Request {
+    b.apply(Change {
         install: vec![fx, new_app("pic", 2048)],
         ..Default::default()
     })
@@ -432,7 +432,7 @@ fn uninstalling_writes_only_the_header_it_rewrites() {
     let mut b = Board::new(cortex_m());
     b.apply(install(&[("a", 8000), ("b", 8000)])).unwrap();
     let (_, writes) = b
-        .apply(Request {
+        .apply(Change {
             uninstall: vec!["a".into()],
             ..Default::default()
         })

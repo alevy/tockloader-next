@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use tock_client::{CliError, connect, context, finish};
-use tock_image::Request;
+use tock_image::Change;
 
 #[path = "apps.rs"]
 mod apps;
@@ -31,14 +31,14 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &Args) -> Result<(), CliError> {
-    let board = context()?;
-    let request = Request {
+    let ctx = context()?;
+    let change = Change {
         uninstall: args.names.clone(),
         allow_repack: args.allow_repack,
         include_sticky: args.include_sticky,
         ..Default::default()
     };
     let mut device = connect()?;
-    apps::apply(&mut device, &board, &request, args.dry_run)?.report(args.dry_run);
+    apps::apply(&mut device, &ctx, &change, args.dry_run)?.report(args.dry_run);
     Ok(())
 }

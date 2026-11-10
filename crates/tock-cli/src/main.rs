@@ -20,7 +20,7 @@
 mod broker;
 mod cli;
 mod config;
-mod device;
+mod connection;
 mod external;
 
 use std::process::ExitCode;

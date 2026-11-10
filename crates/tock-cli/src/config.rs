@@ -1,4 +1,4 @@
-//! Turning the environment into a [`Context`]: which board, which transport,
+//! Turning the environment into [`Settings`]: which board, which transport,
 //! which options, and where each answer came from.
 //!
 //! Every command starts here, including the ones that go on to serve the
@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tock_board::{Context, FileSource, Inputs, Layer, ProjectFile, Resolved, UserConfig};
+use tock_board::{Context, FileSource, Inputs, Layer, ProjectFile, Settings, UserConfig};
 
 use crate::cli::{Format, Global};
 use tock_client::{CliError, Code};
@@ -84,7 +84,7 @@ pub(crate) fn project_apps() -> Result<Vec<PathBuf>, CliError> {
     Ok(project.apps.iter().map(|a| dir.join(&a.tab)).collect())
 }
 
-pub(crate) fn load_context(g: &Global) -> Result<Context, CliError> {
+pub(crate) fn load_settings(g: &Global) -> Result<Settings, CliError> {
     let project = load_project()?;
     let user = match user_config_path().filter(|p| p.is_file()) {
         Some(p) => {
@@ -127,35 +127,38 @@ pub(crate) fn load_context(g: &Global) -> Result<Context, CliError> {
 /// The counterpart to `tock broker`. A subcommand launched by `tock` reads
 /// this from `TOCK_CONTEXT`; one run by hand asks for it.
 pub(crate) fn context(g: &Global) -> Result<(), CliError> {
-    let resolved = Resolved::new(&load_context(g)?, project_apps()?);
-    println!("{}", serde_json::to_string(&resolved).unwrap());
+    let context = Context::new(&load_settings(g)?, project_apps()?);
+    println!("{}", serde_json::to_string(&context).unwrap());
     Ok(())
 }
 
 pub(crate) fn config_show(g: &Global) -> Result<(), CliError> {
-    let ctx = load_context(g)?;
+    let settings = load_settings(g)?;
     if g.format == Format::Json {
-        println!("{}", serde_json::to_string_pretty(&ctx).unwrap());
+        println!("{}", serde_json::to_string_pretty(&settings).unwrap());
         return Ok(());
     }
-    let b = &ctx.board;
+    let b = &settings.board;
     let l = &b.layout;
-    println!("board      {}  ({})", b.board.name, ctx.board_file.value);
-    println!("           from {}", ctx.board_file.source);
-    println!("arch       {}", b.board.arch);
+    println!(
+        "board      {}  ({})",
+        b.info.name, settings.board_file.value
+    );
+    println!("           from {}", settings.board_file.source);
+    println!("arch       {}", b.info.arch);
     println!("flash      {:#x} +{:#x}", l.flash.start.0, l.flash.size.0);
     println!("apps       {:#x} +{:#x}", l.apps.start.0, l.apps.size.0);
     println!("placement  {:?}", l.placement);
-    println!("transport  {}", ctx.transport.name.value);
-    println!("           from {}", ctx.transport.name.source);
-    for (k, v) in &ctx.transport.options {
+    println!("transport  {}", settings.transport.name.value);
+    println!("           from {}", settings.transport.name.source);
+    for (k, v) in &settings.transport.options {
         println!("  {k} = {}    ({})", v.value, v.source);
     }
-    match &ctx.device {
+    match &settings.device {
         Some(d) => println!("device     {}  (from {})", d.value, d.source),
         None => println!("device     (none)"),
     }
-    if let Some(p) = &ctx.project {
+    if let Some(p) = &settings.project {
         println!("project    {p}");
     }
     Ok(())

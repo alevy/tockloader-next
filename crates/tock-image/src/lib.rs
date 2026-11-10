@@ -6,7 +6,7 @@
 //!    If it needs bytes it does not have, it returns [`NeedRead`] and the
 //!    caller fetches those ranges and calls it again.
 //! 2. [`plan`] decides where every app goes, given the apps found and a
-//!    [`Request`]. It only needs headers.
+//!    [`Change`]. It only needs headers.
 //! 3. [`render`] turns a plan into the byte runs that differ from what is
 //!    already there. It may ask for more bytes, to move an app or to tell
 //!    whether a run would change anything.
@@ -20,7 +20,7 @@ mod ranges;
 mod render;
 
 pub use flash::{Flash, NeedRead};
-pub use planner::{Action, NewApp, Plan, PlanError, Request, Slot, plan};
+pub use planner::{Action, Change, NewApp, Plan, PlanError, Slot, plan};
 pub use ranges::coalesce;
 
 pub use render::{WriteRun, render};
