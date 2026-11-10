@@ -1,4 +1,5 @@
-//! The pure core of app management.
+//! The pure model of what is in a board's flash: the list of apps, and what
+//! the kernel says about itself.
 //!
 //! Nothing here touches hardware. The device-facing loop lives in the caller:
 //!
@@ -15,6 +16,7 @@
 //! tested against flash images without a board, and runs in WASM.
 
 mod flash;
+pub mod kernel;
 mod planner;
 mod ranges;
 mod render;
