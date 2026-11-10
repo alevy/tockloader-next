@@ -43,7 +43,5 @@ chip = "nRF52840_xxAA"
 
 # Handled by an external transport plugin (tock-transport-jlink).
 [transports.jlink]
-# `chip`, not `device`: the same thing probe-rs calls `chip` above, and not
-# what `--device` means (a board you have, named in your user config).
 chip = "nrf52840_xxAA"
 speed = 1200
