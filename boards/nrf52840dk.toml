@@ -17,8 +17,6 @@ flash = { start = 0x0000_0000, size = "1M" }
 kernel = { start = 0x0000_0000, size = "256K" }
 apps = { start = 0x0004_0000, size = "768K" }
 app_ram = { start = 0x2000_0000, size = "256K" }
-# The nRF52840 DK kernel has no attribute table.
-attributes = false
 
 # Cortex-M MPU: power-of-two sizes, aligned to their size.
 [layout.placement]

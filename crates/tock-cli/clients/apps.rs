@@ -21,7 +21,8 @@
 
 use tock_board::Context;
 use tock_client::{CliError, Code, proto};
-use tock_image::{Change, Discovered, Flash, NeedRead, Plan, PlanError, WriteRun};
+use tock_image::kernel::{self, Attributes};
+use tock_image::{Change, Discovered, Flash, NeedRead, Plan, PlanError, Region, WriteRun};
 use tock_proto::{Capability, Client, Request};
 
 /// How far apart two reads may be before issuing them separately beats
@@ -63,19 +64,86 @@ pub fn with_reads<T>(
     }
 }
 
-/// The app list as the device has it, and the flash we read to find out.
+/// The board as the device actually describes it: what is installed, and
+/// what the kernel says about itself.
 ///
 /// Named for the answer rather than the verb, because
 /// [`tock_image::discover`] is the verb and this calls it. What it adds is
-/// everything that is not the walk: the capability check, the region, and
-/// the bytes.
-pub fn installed(device: &mut Client, ctx: &Context) -> Result<(Flash, Discovered), CliError> {
+/// everything that is not the walk: the capability check, the bytes, and the
+/// kernel's own account of the board, which takes the board file's place
+/// wherever it has something to say.
+pub struct Survey {
+    /// The resolved context, corrected by anything the kernel reported. Plan
+    /// against this, not against what `tock` handed over: a board file is a
+    /// declaration, and this is the device in front of us.
+    pub context: Context,
+    /// What the kernel said, where there was a kernel to ask.
+    pub kernel: Option<Attributes>,
+    pub flash: Flash,
+    pub found: Discovered,
+}
+
+impl Survey {
+    /// Where `app_ram` came from, for a caller that reports it.
+    pub fn app_ram_from(&self) -> &'static str {
+        match self.kernel.as_ref().map(|k| k.app_ram) {
+            Some(Some(_)) => "kernel",
+            _ => "board file",
+        }
+    }
+}
+
+/// Ask the device what it is, then what is on it.
+pub fn survey(device: &mut Client, ctx: &Context) -> Result<Survey, CliError> {
     device
         .require(Capability::MemoryRead, "reading apps")
         .map_err(proto)?;
-    let mut flash = Flash::new(&ctx.apps);
+
+    // The attribute table ends where the app region begins, so the two reads
+    // abut: issue them as one request and both walks find their bytes
+    // already known. Without `flash` we do not know how far down we may
+    // read, and an access outside it is refused by the transport and fails
+    // the command -- so in that case we do not look.
+    let window = ctx
+        .flash
+        .and_then(|flash| kernel::window(ctx.apps.start, flash.start));
+    let span = window.unwrap_or(Region {
+        start: ctx.apps.start,
+        size: 0,
+    });
+    let mut flash = Flash::new(&Region {
+        start: span.start,
+        size: span.size + ctx.apps.size,
+    });
+    for (address, data) in device
+        .read_ranges(&[(span.start, span.size + tock_image::HEADER_PROBE)])
+        .map_err(proto)?
+    {
+        flash.insert(address, &data);
+    }
+
+    let kernel = match window {
+        Some(_) => with_reads(device, &mut flash, |f| {
+            kernel::attributes(ctx.apps.start, span.start, f)
+        })?,
+        None => None,
+    };
+
+    let mut context = ctx.clone();
+    // The kernel's figure replaces the board file's. The board file declares
+    // the whole of RAM; the kernel has already taken its own data out of the
+    // bottom, and how much it took is a fact about this build.
+    if let Some(app_ram) = kernel.as_ref().and_then(|k| k.app_ram) {
+        context.app_ram = Some(app_ram);
+    }
+
     let found = with_reads(device, &mut flash, |f| tock_image::discover(&ctx.apps, f))?;
-    Ok((flash, found))
+    Ok(Survey {
+        context,
+        kernel,
+        flash,
+        found,
+    })
 }
 
 /// Plan a change, make the device match, and check that it did.
@@ -84,9 +152,12 @@ pub fn installed(device: &mut Client, ctx: &Context) -> Result<(Flash, Discovere
 /// only in the [`Change`] they build and the arguments they parse;
 /// everything from here is the same work, and sharing it is what keeps two
 /// separate binaries behaving like one tool.
+///
+/// Takes the [`Survey`] rather than a [`Context`] so that the context it
+/// plans against is the one the caller can see.
 pub fn apply(
     device: &mut Client,
-    ctx: &Context,
+    survey: &mut Survey,
     change: &Change,
     dry_run: bool,
 ) -> Result<Applied, CliError> {
@@ -95,11 +166,13 @@ pub fn apply(
             .require(Capability::MemoryWrite, "changing apps")
             .map_err(proto)?;
     }
-    let (mut flash, found) = installed(device, ctx)?;
+    // `survey.context`, not whatever the caller was handed: where the kernel
+    // contradicted the board file, the kernel is right.
+    let ctx = &survey.context;
     let app_ram = ctx.app_ram.map(|r| (r.start, r.size));
-    let plan =
-        tock_image::plan(&ctx.apps, &ctx.placement, app_ram, &found, change).map_err(plan_error)?;
-    let writes = with_reads(device, &mut flash, |f| {
+    let plan = tock_image::plan(&ctx.apps, &ctx.placement, app_ram, &survey.found, change)
+        .map_err(|e| plan_error(e, survey))?;
+    let writes = with_reads(device, &mut survey.flash, |f| {
         tock_image::render(&ctx.apps, &plan, f, WRITE_GAP)
     })?;
     if !dry_run {
@@ -193,10 +266,24 @@ impl Applied {
 }
 
 /// Turn a planning failure into something with a next step in it.
-pub fn plan_error(e: PlanError) -> CliError {
+///
+/// `NoCandidate` is the one that needs the survey: an app rejected for its
+/// fixed RAM address was measured against a number, and which number it was
+/// -- the board file's declaration or the kernel's own -- is the difference
+/// between an error a user can act on and one that just says no.
+pub fn plan_error(e: PlanError, survey: &Survey) -> CliError {
     use PlanError::*;
     let error = CliError::new(Code::Failed, e.to_string());
     match e {
+        NoCandidate { .. } => match survey.context.app_ram {
+            Some(ram) => error.hint(format!(
+                "this board's app RAM is {:#x} +{:#x}, according to the {}",
+                ram.start,
+                ram.size,
+                survey.app_ram_from()
+            )),
+            None => error,
+        },
         NeedsRepack { .. } => error
             .hint("rerun with --allow-repack to let tock move other apps")
             .hint("add --dry-run first to see what would move"),

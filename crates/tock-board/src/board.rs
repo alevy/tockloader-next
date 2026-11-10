@@ -60,10 +60,12 @@ pub struct Layout {
     pub apps: Range,
     /// RAM available to apps; used to discard fixed-address builds that
     /// cannot run on this board.
+    ///
+    /// A fallback. The real figure is smaller and is not a fact about the
+    /// board at all: the kernel's own data and bss come out of the bottom of
+    /// this, and how much depends on the build. A caller that can reach the
+    /// device should prefer the kernel's attribute table, which says.
     pub app_ram: Option<Range>,
-    /// Whether the kernel has an attribute table.
-    #[serde(default)]
-    pub attributes: bool,
     #[serde(default)]
     pub placement: Placement,
 }

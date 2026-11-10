@@ -8,8 +8,36 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
+use tock_image::Region;
+use tock_image::kernel::Attributes;
 
 const FLASH_SIZE: usize = 0x10_0000; // nRF52840: 1 MiB at 0
+/// Where `boards/nrf52840dk.toml` says apps begin, and so where a kernel
+/// would leave its attribute table.
+const APPS_START: usize = 0x4_0000;
+
+/// What a real nrf52840dk kernel reports. Taken from a kernel built out of
+/// the Tock tree; the parser's own tests check these bytes exactly.
+fn kernel_attributes() -> Attributes {
+    Attributes {
+        version: tock_image::kernel::VERSION,
+        app_ram: Some(Region {
+            start: 0x2000_8704,
+            size: 227_580,
+        }),
+        kernel_binary: Some(Region {
+            start: 0,
+            size: 172_032,
+        }),
+        kernel_version: Some(tock_image::kernel::Version {
+            major: 2,
+            minor: 4,
+            patch: 0,
+            prerelease: 1,
+        }),
+        other: Vec::new(),
+    }
+}
 
 struct Dir(PathBuf);
 
@@ -28,15 +56,27 @@ impl Dir {
         std::fs::write(&p, vec![0xFF; FLASH_SIZE]).unwrap();
         p
     }
+
+    /// An erased image with a kernel attribute table ending where the app
+    /// region begins, which is where a real kernel leaves one.
+    fn with_kernel(&self, f: &str, attrs: &Attributes) -> PathBuf {
+        let p = self.path(f);
+        let mut image = vec![0xFF; FLASH_SIZE];
+        let table = attrs.to_bytes();
+        image[APPS_START - table.len()..APPS_START].copy_from_slice(&table);
+        std::fs::write(&p, image).unwrap();
+        p
+    }
     /// A TAB like elf2tab's, for `cortex-m4`, optionally built for a fixed
     /// flash address.
     fn tab(&self, name: &str, total: u32, fixed_flash: Option<u32>) -> PathBuf {
-        let tbf = tbf::testing::app(
-            name,
-            total,
-            total / 2,
-            fixed_flash.map(|f| (0x2000_8000, f)),
-        );
+        self.tab_ram(name, total, fixed_flash, 0x2000_8000)
+    }
+
+    /// The same, with a say in the fixed *RAM* address -- which is what the
+    /// kernel's attribute table has an opinion about.
+    fn tab_ram(&self, name: &str, total: u32, fixed_flash: Option<u32>, ram: u32) -> PathBuf {
+        let tbf = tbf::testing::app(name, total, total / 2, fixed_flash.map(|f| (ram, f)));
         let meta = format!("tab-version = 1\nname = \"{name}\"\n");
         let p = self.path(&format!("{name}.tab"));
         // Content only, no filler: Python re-serializes footers, so filler
@@ -885,4 +925,114 @@ fn an_error_is_json_whoever_produced_it() {
         assert_eq!(value["error"], "no board selected", "{command:?}");
         assert!(value["hints"].as_array().is_some_and(|h| !h.is_empty()));
     }
+}
+
+// --- kernel attributes ---------------------------------------------------
+
+/// The kernel's own figure for app RAM replaces the board file's, and the
+/// output says which it used. Every board file in this repo declares the
+/// whole of RAM; the kernel has already taken its data and bss out of the
+/// bottom, and how much it took is a fact about that build.
+#[test]
+fn the_kernel_corrects_the_board_files_app_ram() {
+    let d = Dir::new("kernel-app-ram");
+    let image = d.with_kernel("flash.bin", &kernel_attributes());
+    let opt = format!("path={}", image.display());
+    let out = ok(tock(&d, &on_file(&opt, &["--format", "json", "list"])));
+    let v: Value = serde_json::from_str(&out).unwrap();
+
+    assert_eq!(v["app_ram"]["from"], "kernel");
+    assert_eq!(v["app_ram"]["start"], 0x2000_8704u64);
+    assert_eq!(v["app_ram"]["size"], 227_580u64);
+    assert_eq!(v["kernel"]["version"], "2.4.0-dev");
+    assert_eq!(v["kernel"]["binary"]["size"], 172_032u64);
+}
+
+/// A board with no kernel on it must behave exactly as it did before any of
+/// this existed: the board file's figure, no warning, no failure. Every
+/// other test in this file runs against an erased image, so this is the one
+/// that stops a missing table becoming fatal.
+#[test]
+fn a_board_with_no_kernel_is_unchanged() {
+    let d = Dir::new("kernel-absent");
+    let image = d.erased("flash.bin");
+    let opt = format!("path={}", image.display());
+    let out = tock(&d, &on_file(&opt, &["--format", "json", "list"]));
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "",
+        "an absent table must be silent"
+    );
+    let v: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(v["app_ram"]["from"], "board file");
+    // What boards/nrf52840dk.toml declares.
+    assert_eq!(v["app_ram"]["start"], 0x2000_0000u64);
+    assert_eq!(v["kernel"], Value::Null);
+}
+
+/// The point of the whole exercise. `boards/nrf52840dk.toml` declares app
+/// RAM from 0x20000000, but the kernel reports it starting 33.8 KiB higher.
+/// An app fixed to a RAM address in that gap cannot run, and until the
+/// kernel was asked it was installed anyway.
+#[test]
+fn an_app_fixed_into_kernel_ram_is_refused_once_the_kernel_is_asked() {
+    let d = Dir::new("kernel-ram-gap");
+    // 0x20001000 is inside the board file's claim and below the kernel's.
+    let gap = d.tab_ram("gapapp", 2048, Some(0x4_0400), 0x2000_1000);
+    let gap = gap.display().to_string();
+
+    let with_kernel = d.with_kernel("kernel.bin", &kernel_attributes());
+    let without = d.erased("erased.bin");
+
+    let refused = tock(
+        &d,
+        &on_file(
+            &format!("path={}", with_kernel.display()),
+            &["install", "--dry-run", &gap],
+        ),
+    );
+    assert!(!refused.status.success(), "must be refused");
+    let why = String::from_utf8_lossy(&refused.stderr);
+    assert!(why.contains("fixed RAM address"), "{why}");
+    // The number, and whose it is -- otherwise there is nothing to act on.
+    assert!(why.contains("0x20008704"), "{why}");
+    assert!(why.contains("according to the kernel"), "{why}");
+
+    // The same TAB on a board that cannot say otherwise still installs, so
+    // this is the kernel's doing and not a new blanket restriction.
+    let allowed = tock(
+        &d,
+        &on_file(
+            &format!("path={}", without.display()),
+            &["install", "--dry-run", &gap],
+        ),
+    );
+    assert!(
+        allowed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+}
+
+/// Asking the kernel costs nothing: the attribute table ends where the app
+/// region begins, so one request covers the window and the first header
+/// probe together. Without this the feature quietly doubles the round trips
+/// of every command.
+#[test]
+fn asking_the_kernel_costs_no_extra_round_trip() {
+    let d = Dir::new("kernel-round-trips");
+    let image = d.with_kernel("flash.bin", &kernel_attributes());
+    let opt = format!("path={}", image.display());
+    let out = tock(
+        &d,
+        &on_file(&opt, &["--trace-protocol", "--format", "json", "list"]),
+    );
+    let trace = String::from_utf8_lossy(&out.stderr);
+    // One leg of the conversation: `tock` also relays each message.
+    let reads = trace
+        .lines()
+        .filter(|l| l.starts_with("transport -> ") && l.contains(r#""op":"read""#))
+        .count();
+    assert_eq!(reads, 1, "one read for an empty board:\n{trace}");
 }
