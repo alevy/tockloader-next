@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 serde.workspace = true
 tock-image.workspace = true
-serde_json.workspace = true
 toml.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

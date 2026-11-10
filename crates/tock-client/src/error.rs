@@ -1,4 +1,7 @@
-/// Exit codes are part of the CLI's contract (see the PRD, FR-41).
+/// Exit codes are part of the CLI's contract: a script may branch on them, so
+/// they are as much an interface as the output is. `tock` reads a
+/// subcommand's code and exits with it unchanged, which is why there is one
+/// list here rather than one per binary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Code {
     /// Plan could not be made (doesn't fit, unknown app, ...).

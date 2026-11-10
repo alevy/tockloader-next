@@ -3,7 +3,8 @@
 //! The same broker answers two carriers. `tock broker` serves it on stdio,
 //! for a subcommand nobody launched. [`external`](crate::external) serves it
 //! on a socket the subcommand inherits as fd 3, which is the usual case and
-//! the one where `tock` genuinely owns the connection the PRD says it does.
+//! the one where `tock` genuinely owns the connection: it opened the
+//! transport, and a subcommand reaches the device only by asking.
 //!
 //! The transport is opened on the first request that needs it, so a
 //! subcommand that never touches a device -- building a TAB, say -- does not

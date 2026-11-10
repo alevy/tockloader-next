@@ -21,5 +21,4 @@ tar = { version = "0.4", default-features = false }
 thiserror = "1"
 tempfile = "3.27"
 libc = "0.2"
-anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "string"] }
