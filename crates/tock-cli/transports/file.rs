@@ -102,9 +102,11 @@ impl FileTransport {
     }
 }
 
-/// Keep an access inside the image. The broker checks this too, with a better
-/// message, but a transport is a separate executable: anyone who can spawn it
-/// can talk to it, with no broker in front.
+/// Keep an access inside the image.
+///
+/// Nothing in front does this: a transport is a separate executable, so anyone
+/// who can spawn it can talk to it with no `tock` in the way. The transport
+/// owns its device's address map and is the only thing that can enforce it.
 fn check_range(flash: &FlashInfo, address: u64, len: u64) -> Result<(), Response> {
     if address < flash.start || address + len > flash.start + flash.size {
         return Err(Response::error(

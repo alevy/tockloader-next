@@ -3,8 +3,12 @@ use tock_image::{Placement, Region};
 
 use crate::{Error, FileSource, Size};
 
-/// Boards shipped with the tool. In the proposed model this is a snapshot
-/// generated from board files kept next to each board's linker script.
+/// Boards shipped with the tool.
+///
+/// These are snapshots. The intent is that a board file lives beside that
+/// board's linker script in the kernel tree, where the addresses come from,
+/// and this table is generated from them -- so a layout cannot drift from the
+/// kernel it describes without someone noticing.
 pub const BUNDLED: &[(&str, &str)] = &[
     (
         "nrf52840dk",

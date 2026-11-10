@@ -1,8 +1,19 @@
 # M0 spike: findings
 
-Status: **in progress.** The software side of M0 is done and tested without
-hardware. Checking against real nRF52840dk and RP2350 boards (the M0 exit
-criterion) has **not** been done yet; see [What's left](#whats-left).
+> **A record, not a current description.** This is what the M0 spike found and
+> concluded, written while it was being built. The findings about Python
+> tockloader (below) still hold and are the reason several behaviours differ.
+> The recommendations did not all survive contact with the code -- where one
+> was later decided the other way, it is marked **Superseded** in place.
+> Counts and crate descriptions here are as of writing; the code is the
+> authority. References below to "the PRD" are to a document that is not in
+> this repository; they are left as written so the record stays intact, but
+> nothing here depends on having read it.
+
+Status at the time: **in progress.** The software side of M0 was done and
+tested without hardware. Checking against real nRF52840dk and RP2350 boards
+(the M0 exit criterion) had **not** been done; see
+[What's left](#whats-left).
 
 ## What was built
 
@@ -43,7 +54,7 @@ function again. This gives three things:
 
 ## How it was validated
 
-`cargo test` runs 37 tests:
+`cargo test` ran 37 tests at the time (84 today):
 
 - **Planner scenarios** (`tock-image/tests/planner.rs`, 14 tests):
   - Installing on an empty board, largest app first, with MPU alignment
@@ -122,10 +133,17 @@ top of one planner (built), with two modes:
 removes apps not listed. It's small to add, but deliberately left out until
 we've seen how people use the project file.
 
-**OQ-2: porcelain compiled in, or separate binaries?** Recommendation:
-compiled in. External subcommands reach the device through `tock broker`
+**OQ-2: porcelain compiled in, or separate binaries?** Recommendation at the
+time: compiled in. External subcommands reach the device through `tock broker`
 with exactly the same capabilities, so separate binaries would add
 distribution cost without adding flexibility.
+
+> **Superseded.** Shipped the other way: `install`, `uninstall` and `list` are
+> each a `tock-<name>` binary, reached exactly as a third party's would be.
+> The argument above weighs distribution cost against flexibility and misses
+> the one that decided it -- if the commands we ship take a path no one else
+> can take, that path is untested by us and the claim that a `tock-tickv`
+> works is a guess. `tock` now parses no subcommand's arguments at all.
 
 **OQ-3: OpenOCD vs. probe-rs.** Not decided. This needs hardware. Leaning
 toward **probe-rs built in as a library**: it's Rust, it uses `nusb` for USB
