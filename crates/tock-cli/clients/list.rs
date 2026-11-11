@@ -29,7 +29,8 @@ fn main() -> ExitCode {
 fn run(json: bool) -> Result<(), CliError> {
     let ctx = context()?;
     let mut device = connect()?;
-    let (_, found) = apps::installed(&mut device, &ctx)?;
+    let survey = apps::survey(&mut device, &ctx)?;
+    let found = &survey.found;
 
     let apps: Vec<_> = found
         .apps()
@@ -54,9 +55,23 @@ fn run(json: bool) -> Result<(), CliError> {
                 "board": ctx.board.name,
                 "apps": apps,
                 "end": found.end(&ctx.apps),
+                "app_ram": survey.context.app_ram.map(|r| serde_json::json!({
+                    "start": r.start,
+                    "size": r.size,
+                    "from": survey.app_ram_from(),
+                })),
+                "kernel": survey.kernel.as_ref().map(|k| serde_json::json!({
+                    "version": k.kernel_version.map(|v| v.to_string()),
+                    "binary": k.kernel_binary.map(|r| serde_json::json!({
+                        "start": r.start, "size": r.size,
+                    })),
+                })),
             })
         );
         return Ok(());
+    }
+    if let Some(version) = survey.kernel.as_ref().and_then(|k| k.kernel_version) {
+        println!("Kernel: {version}");
     }
     if apps.is_empty() {
         println!("no apps installed");

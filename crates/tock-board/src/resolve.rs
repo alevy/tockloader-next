@@ -172,9 +172,20 @@ pub struct Context {
     /// Where apps live, and the rules for placing them there.
     pub apps: Region,
     pub placement: Placement,
-    /// RAM available to an app, when the board file says. Used to rule out
-    /// fixed-address builds that cannot run here.
+    /// RAM available to an app, as the board file declares it. A guess: the
+    /// kernel's own data comes out of the bottom of this, so the real figure
+    /// is smaller and depends on the kernel build. A client that can reach
+    /// the device should prefer what the kernel reports.
     pub app_ram: Option<Region>,
+    /// The whole flash the transport was opened for.
+    ///
+    /// Only a bound, and only for a client that reads outside the app region
+    /// -- looking below it for the kernel's attributes, say. An access
+    /// outside this is refused by the transport and fails the command, so a
+    /// client that cannot see this value should not go looking. `None` means
+    /// it was resolved by a `tock` that did not carry it.
+    #[serde(default)]
+    pub flash: Option<Region>,
     /// The project's `[[app]]` entries, resolved to absolute paths, so a
     /// client installing "whatever this project declares" need not find or
     /// parse `Tock.toml` itself.
@@ -196,6 +207,10 @@ impl Context {
                 .board
                 .app_ram()
                 .map(|(start, size)| Region { start, size }),
+            flash: Some(Region {
+                start: settings.board.layout.flash.start.0,
+                size: settings.board.layout.flash.size.0,
+            }),
             project_apps,
         }
     }

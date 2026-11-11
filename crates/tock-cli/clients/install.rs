@@ -63,7 +63,8 @@ fn run(args: &Args) -> Result<(), CliError> {
     };
 
     let mut device = connect()?;
-    apps::apply(&mut device, &ctx, &change, args.dry_run)?.report(args.dry_run);
+    let mut survey = apps::survey(&mut device, &ctx)?;
+    apps::apply(&mut device, &mut survey, &change, args.dry_run)?.report(args.dry_run);
     Ok(())
 }
 

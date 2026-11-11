@@ -1,4 +1,5 @@
-//! The pure core of app management.
+//! The pure model of what is in a board's flash: the list of apps, and what
+//! the kernel says about itself.
 //!
 //! Nothing here touches hardware. The device-facing loop lives in the caller:
 //!
@@ -15,6 +16,7 @@
 //! tested against flash images without a board, and runs in WASM.
 
 mod flash;
+pub mod kernel;
 mod planner;
 mod ranges;
 mod render;
@@ -137,7 +139,10 @@ impl Discovered {
 /// How much to read when probing for a header. A TBF header is well under
 /// this, so one read covers the lengths and the header together rather than
 /// paying for two round trips. A format fact, not a transport one.
-const HEADER_PROBE: u64 = 256;
+///
+/// Public because a caller that reads ahead of [`discover`] has to know how
+/// much it would ask for, to cover it in the same request.
+pub const HEADER_PROBE: u64 = 256;
 
 /// Read the header at `address`, or `None` if there is not one there.
 ///
