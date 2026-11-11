@@ -51,6 +51,24 @@ pub(crate) fn installed() -> Vec<String> {
     names
 }
 
+/// The transports that exist on this machine, sorted. The mirror image of
+/// [`installed`].
+pub(crate) fn transports() -> Vec<String> {
+    let mut names: Vec<String> = search_path()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .flatten()
+        .filter(|e| executable(&e.path()))
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            Some(name.strip_prefix("tock-transport-")?.to_string())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// A file we could actually run. Both callers want this: listing a command
 /// we would refuse to spawn, or spawning one we would not list, is the same
 /// mistake in two directions.
@@ -100,6 +118,7 @@ pub(crate) fn external(g: &Global, args: Vec<String>) -> Result<(), CliError> {
                 serde_json::json!({
                     "code": e.code as u8,
                     "message": e.message,
+                    "details": e.details,
                     "hints": e.hints,
                 })
                 .to_string(),

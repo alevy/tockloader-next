@@ -1036,3 +1036,144 @@ fn asking_the_kernel_costs_no_extra_round_trip() {
         .count();
     assert_eq!(reads, 1, "one read for an empty board:\n{trace}");
 }
+
+// --- transport options ---------------------------------------------------
+
+/// The bug this exists to fix. `crate` is a typo for `create`; it used to be
+/// resolved, given provenance, serialised into `Open` and then ignored, and
+/// the command succeeded as though nothing had been asked for.
+#[test]
+fn a_typo_in_an_option_is_refused_not_swallowed() {
+    let d = Dir::new("option-typo");
+    let image = d.erased("flash.bin");
+    let opt = format!("path={}", image.display());
+    let out = tock(
+        &d,
+        &on_file(&opt, &["--opt", "crate=true", "--format", "json", "list"]),
+    );
+    assert!(!out.status.success(), "a typo must not succeed");
+    let v: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("`crate`"), "{v}");
+    // Where it came from is context, and what to do about it is a hint.
+    let details = v["details"].as_array().unwrap();
+    assert!(
+        details
+            .iter()
+            .any(|d| d.as_str().unwrap().contains("flag --opt crate")),
+        "{v}"
+    );
+    let hints = v["hints"].as_array().unwrap();
+    assert!(
+        hints
+            .iter()
+            .any(|h| h.as_str().unwrap().contains("did you mean `create`")),
+        "{v}"
+    );
+}
+
+/// A key nothing resembles gets no guess. A wrong suggestion is worse than
+/// none, and the list of what is actually read is the useful part.
+#[test]
+fn an_unrecognisable_option_is_refused_without_a_guess() {
+    let d = Dir::new("option-nonsense");
+    let image = d.erased("flash.bin");
+    let opt = format!("path={}", image.display());
+    let out = tock(&d, &on_file(&opt, &["--opt", "nonsense=42", "list"]));
+    assert!(!out.status.success());
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(why.contains("`nonsense`"), "{why}");
+    assert!(!why.contains("did you mean"), "no plausible guess: {why}");
+    assert!(why.contains("path, create"), "{why}");
+}
+
+/// Declared options still work, so the check refuses only what it should.
+#[test]
+fn declared_options_are_accepted() {
+    let d = Dir::new("option-declared");
+    let image = d.path("made.bin");
+    let out = tock(
+        &d,
+        &on_file(
+            &format!("path={}", image.display()),
+            &["--opt", "create=true", "list"],
+        ),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(image.exists(), "`create` was honoured");
+}
+
+/// The division of labour: the transport knows a value is wrong and says
+/// which key, and `tock` -- the only end that resolved it -- says which file
+/// wrote it. Neither sentence is much use alone.
+#[test]
+fn a_bad_value_is_reported_with_where_it_came_from() {
+    let d = Dir::new("option-provenance");
+    std::fs::write(
+        d.path("Tock.toml"),
+        "board = \"nrf52840dk\"\ntransport = \"file\"\n\n[transports.file]\npath = \"missing.bin\"\n",
+    )
+    .unwrap();
+    let out = tock(&d, &["--format", "json", "list"]);
+    assert!(!out.status.success());
+    let v: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+
+    let details: Vec<&str> = v["details"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_str().unwrap())
+        .collect();
+    // `path` was set, and we say by which file.
+    assert!(
+        details
+            .iter()
+            .any(|d| d.contains("path =") && d.contains("Tock.toml")),
+        "{details:?}"
+    );
+    // `create` was named by the transport but never set, which is also worth
+    // saying -- it is the one the user is about to be told to add.
+    assert!(
+        details
+            .iter()
+            .any(|d| d.contains("`create`") && d.contains("not set")),
+        "{details:?}"
+    );
+}
+
+/// `tock transports` asks each one what it is. `Hello` is answered before a
+/// transport touches a device, so this works with nothing plugged in --
+/// which is the point, since it is what you run to find out what to plug in.
+#[test]
+fn transports_lists_what_each_one_reads() {
+    let d = Dir::new("transports-listing");
+    let out = ok(tock(&d, &["--format", "json", "transports"]));
+    let v: Value = serde_json::from_str(&out).unwrap();
+    let names: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"file"), "{names:?}");
+    assert!(names.contains(&"openocd"), "{names:?}");
+
+    let file = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "file")
+        .unwrap();
+    let options: Vec<&str> = file["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(options, vec!["path", "create"]);
+    // The same list the refusal above quotes, from the same source.
+    assert_eq!(file["capabilities"][0], "memory_read");
+}

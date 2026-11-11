@@ -157,8 +157,67 @@ fn a_short_read_is_an_error_not_a_silent_retry() {
     let mut client = Client {
         connection: Box::new(Stingy),
         transport: "stingy".into(),
+        version: "0".into(),
         capabilities: vec![Capability::MemoryRead],
+        options: vec![],
     };
     let err = client.read_ranges(&[(0x1000, 64)]).unwrap_err();
     assert!(format!("{err}").contains('4'), "{err}");
+}
+
+/// A transport is asked what it reads, and the caller holds it to that. An
+/// empty declaration means it reads nothing -- not "do not check", which
+/// would make the whole thing advisory.
+#[test]
+fn undeclared_options_are_the_ones_the_far_end_never_claimed() {
+    let spec = |name: &str| OptionSpec {
+        name: name.into(),
+        description: String::new(),
+    };
+    let client = |options: Vec<OptionSpec>| Client {
+        connection: Box::new(Stingy),
+        transport: "t".into(),
+        version: "0".into(),
+        capabilities: vec![],
+        options,
+    };
+
+    let declared = client(vec![spec("path"), spec("create")]);
+    assert_eq!(
+        declared.undeclared(["path", "create"]),
+        Vec::<String>::new()
+    );
+    // Sorted, so the same set reports the same way twice.
+    assert_eq!(
+        declared.undeclared(["zebra", "crate", "path"]),
+        vec!["crate".to_string(), "zebra".to_string()]
+    );
+
+    let declares_nothing = client(vec![]);
+    assert_eq!(declares_nothing.undeclared(["path"]), vec!["path"]);
+    assert_eq!(
+        declares_nothing.undeclared([]),
+        Vec::<String>::new(),
+        "nothing given, nothing to refuse"
+    );
+}
+
+/// `keys` and `details` are additive: a responder that has never heard of
+/// them still parses, so adding them did not strand anyone.
+#[test]
+fn an_error_without_keys_or_details_still_parses() {
+    let old = r#"{"result":"error","kind":"device","message":"boom","suggestion":null}"#;
+    let parsed: Response = serde_json::from_str(old).unwrap();
+    assert_eq!(parsed, Response::error(ErrorKind::Device, "boom"));
+}
+
+/// The same for a `Hello` that declares no options.
+#[test]
+fn a_hello_without_options_still_parses() {
+    let old = r#"{"result":"hello","protocol":0,"transport":"t","version":"1","capabilities":[]}"#;
+    let parsed: Response = serde_json::from_str(old).unwrap();
+    match parsed {
+        Response::Hello { options, .. } => assert!(options.is_empty()),
+        other => panic!("{other:?}"),
+    }
 }

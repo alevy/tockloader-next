@@ -105,6 +105,9 @@ pub enum Response {
         transport: String,
         version: String,
         capabilities: Vec<Capability>,
+        /// Every option this transport reads. See [`OptionSpec`].
+        #[serde(default)]
+        options: Vec<OptionSpec>,
     },
     Ok,
     /// Payload carries the data.
@@ -124,6 +127,21 @@ pub enum Response {
         message: String,
         /// A command the user can run next, if the transport knows one.
         suggestion: Option<String>,
+        /// Context the user did not supply and could not have known -- which
+        /// file set the option that failed, say. Distinct from `suggestion`,
+        /// which is a thing to go and do: rendering provenance as "try ..."
+        /// reads as advice to do what is already the case.
+        #[serde(default)]
+        details: Vec<String>,
+        /// Which resolved options this is about, if any. More than one when
+        /// it is their combination that is wrong.
+        ///
+        /// The transport names the key because only it knows what a good
+        /// value is; the caller resolved that key and knows which file wrote
+        /// it, so the caller is what says where it came from. Neither end
+        /// can produce that sentence alone.
+        #[serde(default)]
+        keys: Vec<String>,
     },
 }
 
@@ -133,6 +151,49 @@ impl Response {
             kind,
             message: message.into(),
             suggestion: None,
+            details: Vec::new(),
+            keys: Vec::new(),
+        }
+    }
+
+    /// Add context lines, which print above any suggestion.
+    pub fn detailed(self, details: impl IntoIterator<Item = impl Into<String>>) -> Response {
+        match self {
+            Response::Error {
+                kind,
+                message,
+                suggestion,
+                keys,
+                ..
+            } => Response::Error {
+                kind,
+                message,
+                suggestion,
+                details: details.into_iter().map(Into::into).collect(),
+                keys,
+            },
+            other => other,
+        }
+    }
+
+    /// Name the options this error is about, so the caller can say where
+    /// each was written. A no-op on any response that is not an error.
+    pub fn about(self, keys: impl IntoIterator<Item = impl Into<String>>) -> Response {
+        match self {
+            Response::Error {
+                kind,
+                message,
+                suggestion,
+                details,
+                ..
+            } => Response::Error {
+                kind,
+                message,
+                suggestion,
+                details,
+                keys: keys.into_iter().map(Into::into).collect(),
+            },
+            other => other,
         }
     }
 
@@ -140,10 +201,18 @@ impl Response {
     /// that is not an error.
     pub fn with_suggestion(self, hint: impl Into<String>) -> Response {
         match self {
-            Response::Error { kind, message, .. } => Response::Error {
+            Response::Error {
+                kind,
+                message,
+                details,
+                keys,
+                ..
+            } => Response::Error {
                 kind,
                 message,
                 suggestion: Some(hint.into()),
+                details,
+                keys,
             },
             other => other,
         }
@@ -170,6 +239,57 @@ pub enum Capability {
     Console,
     /// Namespaced vendor operations, passed through untouched.
     Vendor(String),
+}
+
+impl Client {
+    /// The keys among `given` that the far end never declared.
+    ///
+    /// Sorted, so an error lists them the same way twice.
+    pub fn undeclared<'a>(&self, given: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+        let mut unknown: Vec<String> = given
+            .into_iter()
+            .filter(|key| !self.options.iter().any(|o| o.name == *key))
+            .map(str::to_string)
+            .collect();
+        unknown.sort();
+        unknown
+    }
+}
+
+impl Capability {
+    /// The name this goes by on the wire, for a message or a listing.
+    pub fn name(&self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|v| match v {
+                serde_json::Value::String(s) => Some(s),
+                serde_json::Value::Object(map) => map.keys().next().cloned(),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// One option a transport reads, as it declares itself in [`Response::Hello`].
+///
+/// **A transport must declare every option it reads.** The caller refuses a
+/// key that is not here, so an option a transport forgets to declare is an
+/// option it will never be given. An empty list means it takes none.
+///
+/// Names and prose, not types. A declared type would only catch a subset of
+/// wrong -- `page_size = 5000` is a perfectly good integer and still useless
+/// -- so the value is the transport's to judge, at [`Request::Open`], where
+/// it answers with the offending key in [`Response::Error::keys`]. What is
+/// declared here is the part that is genuinely static: which keys exist. The
+/// caller is the only end that can check those, because it is the end that
+/// resolved them, and it can do so before the transport has touched a device.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionSpec {
+    /// The key, exactly as it appears in `[transports.<name>]` and in
+    /// `--opt <key>=<value>`.
+    pub name: String,
+    /// One line, for a listing and for an error that says what is available.
+    pub description: String,
 }
 
 /// The flash a transport is opened for, from [`Request::Open`].
@@ -273,6 +393,8 @@ pub enum ProtoError {
         message: String,
         /// What the user might do about it, in whole sentences. One per line.
         suggestion: Option<String>,
+        /// Context, as on [`Response::Error::details`].
+        details: Vec<String>,
     },
 }
 
@@ -282,6 +404,25 @@ impl ProtoError {
             kind: ErrorKind::Device,
             message: message.into(),
             suggestion: None,
+            details: Vec::new(),
+        }
+    }
+
+    /// Add context lines, which print above any suggestion.
+    pub fn detailed(self, details: impl IntoIterator<Item = impl Into<String>>) -> ProtoError {
+        match self {
+            ProtoError::Failed {
+                kind,
+                message,
+                suggestion,
+                ..
+            } => ProtoError::Failed {
+                kind,
+                message,
+                suggestion,
+                details: details.into_iter().map(Into::into).collect(),
+            },
+            other => other,
         }
     }
 
@@ -291,11 +432,13 @@ impl ProtoError {
             ProtoError::Failed {
                 message,
                 suggestion,
+                details,
                 ..
             } => ProtoError::Failed {
                 kind,
                 message,
                 suggestion,
+                details,
             },
             other => other,
         }
@@ -304,10 +447,16 @@ impl ProtoError {
     /// Attach the line the CLI prints as `try: ...`.
     pub fn with_suggestion(self, hint: impl Into<String>) -> ProtoError {
         match self {
-            ProtoError::Failed { kind, message, .. } => ProtoError::Failed {
+            ProtoError::Failed {
+                kind,
+                message,
+                details,
+                ..
+            } => ProtoError::Failed {
                 kind,
                 message,
                 suggestion: Some(hint.into()),
+                details,
             },
             other => other,
         }
@@ -398,7 +547,11 @@ pub struct Client {
     /// failure kept apart. Everything else should use [`Client::call`].
     pub connection: Box<dyn Connection>,
     pub transport: String,
+    /// The far end's own version, as it reported it.
+    pub version: String,
     pub capabilities: Vec<Capability>,
+    /// Every option the far end said it reads. See [`OptionSpec`].
+    pub options: Vec<OptionSpec>,
 }
 
 impl Client {
@@ -416,8 +569,9 @@ impl Client {
                 Response::Hello {
                     protocol,
                     transport,
+                    version,
                     capabilities,
-                    ..
+                    options,
                 },
                 _,
             ) => {
@@ -430,7 +584,9 @@ impl Client {
                 Ok(Client {
                     connection,
                     transport,
+                    version,
                     capabilities,
+                    options,
                 })
             }
             (other, _) => Err(ProtoError::Unexpected(Box::new(other))),
@@ -456,10 +612,7 @@ impl Client {
         if self.capabilities.contains(&capability) {
             return Ok(());
         }
-        let name = serde_json::to_value(&capability)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_default();
+        let name = capability.name();
         Err(ProtoError::failed(format!(
             "`{doing}` needs the `{name}` capability, which transport `{}` does not have",
             self.transport
@@ -515,10 +668,14 @@ fn collapse(
                 kind,
                 message,
                 suggestion,
+                details,
+                ..
             },
             _,
         ) => {
-            let error = ProtoError::failed(message).with_kind(kind);
+            let error = ProtoError::failed(message)
+                .with_kind(kind)
+                .detailed(details);
             Err(match suggestion {
                 Some(hint) => error.with_suggestion(hint),
                 None => error,
@@ -653,10 +810,13 @@ impl From<ProtoError> for Response {
                 kind,
                 message,
                 suggestion,
+                details,
             } => Response::Error {
                 kind,
                 message,
                 suggestion,
+                details,
+                keys: Vec::new(),
             },
             other => Response::error(ErrorKind::Device, other.to_string()),
         }
