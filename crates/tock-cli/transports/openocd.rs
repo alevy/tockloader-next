@@ -341,6 +341,16 @@ fn config_step(entry: &serde_json::Value, base: Option<&Path>) -> Result<Step, F
     .into())
 }
 
+/// How to leave the target, given whether flash was programmed.
+///
+/// Read-only work puts it back as it was found, so looking at a running
+/// board does not disturb it. Programming resets, because resuming into code
+/// that changed underneath is not a state the device was ever in -- and
+/// after installing an app, running it is the point.
+fn parting_command(wrote: bool) -> &'static str {
+    if wrote { "reset run" } else { "resume" }
+}
+
 /// A running openocd and the connection to its TCL port.
 struct Session {
     openocd: Child,
@@ -351,6 +361,9 @@ struct Session {
     /// The erase unit, from the `page_size` option. openocd erases whole
     /// sectors, so this is what a write has to be rounded out to.
     page_size: u64,
+    /// Whether anything was programmed, which decides how the target is left
+    /// at `Close`. See [`Session::release`].
+    wrote: bool,
 }
 
 impl Session {
@@ -416,6 +429,7 @@ impl Session {
             tcl,
             log,
             page_size,
+            wrote: false,
         };
         // Flash operations need a halted target, and holding it halted for the
         // session keeps every later request working the same way.
@@ -492,7 +506,31 @@ impl Session {
         scratch.flush()?;
         let path = scratch.path().display().to_string();
         self.run(&format!("flash write_image erase {path} {address:#x} bin"))?;
+        self.wrote = true;
         Ok(())
+    }
+
+    /// Give the target back, then ask openocd to go.
+    ///
+    /// The core is halted for the life of the session, so leaving it that
+    /// way hands back a board that does not run -- and a halted core stays
+    /// halted once the debugger goes away. The protocol says `Close`
+    /// releases the device; this is what releasing it means.
+    ///
+    /// Which of the two ways depends on what we did. Having only read, the
+    /// target is put back as it was found, so inspecting a running board
+    /// does not disturb it. Having programmed flash, it is reset, because
+    /// resuming into code that changed underneath is not a state the device
+    /// was ever in -- and after installing an app, running it is the point.
+    ///
+    /// Best effort throughout: this runs while shutting down, and a board
+    /// that will not resume is not a reason to fail a command that worked.
+    fn release(&mut self) {
+        let _ = self.tcl_cmd(parting_command(self.wrote));
+        // Ask openocd to go rather than killing it, so it lets go of the
+        // adapter cleanly. It stops answering at once, so the reply, if any,
+        // is not worth reading.
+        let _ = self.tcl_cmd("shutdown");
     }
 
     /// Send one command and fail if openocd did.
@@ -510,9 +548,21 @@ impl Session {
 }
 
 impl Drop for Session {
-    /// Without this, a transport that dies before `Close` leaves openocd
-    /// holding the debug adapter, and the next run fails with the probe busy.
+    /// Release the target, however the session ended.
+    ///
+    /// Here rather than only on `Close`, because `Close` is not reliably the
+    /// way a session ends. `tock` answers its own client's `Close` locally
+    /// -- the client did not open this transport and does not get to say
+    /// when it shuts -- and then leaves by `process::exit`, which runs no
+    /// destructors, so the transport's own `Close` is never sent. What the
+    /// transport actually sees is end of stream. Dropping is the one event
+    /// common to every ending, so the release belongs here.
+    ///
+    /// The kill stays as the backstop: if openocd ignored `shutdown`, or
+    /// never got it, it would otherwise keep the debug adapter and the next
+    /// run would fail with the probe busy.
     fn drop(&mut self) {
+        self.release();
         let _ = self.openocd.kill();
         let _ = self.openocd.wait();
     }
@@ -677,7 +727,8 @@ impl OpenocdTransport {
                 Ok((Response::Ok, vec![]))
             }
             Request::Close => {
-                self.session = None; // Drop kills openocd
+                // Dropping it releases the target and reaps openocd.
+                self.session = None;
                 Ok((Response::Ok, vec![]))
             }
             other => Err(Response::error(

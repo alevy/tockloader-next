@@ -206,3 +206,12 @@ fn an_access_outside_flash_is_refused_before_openocd_is_asked() {
     let message = refusal(t.read(0x8002_0000, 4));
     assert!(message.contains("not open"), "{message}");
 }
+
+/// The session halts the target to do its work, so how it is left is the
+/// difference between a board that runs afterwards and one that does not.
+/// The command itself needs hardware; which command is chosen does not.
+#[test]
+fn a_session_that_wrote_resets_and_one_that_only_read_resumes() {
+    assert_eq!(parting_command(true), "reset run");
+    assert_eq!(parting_command(false), "resume");
+}

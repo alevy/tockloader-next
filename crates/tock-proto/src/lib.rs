@@ -25,7 +25,17 @@
 //! 3. Operations -- [`Request::Read`], [`Request::Write`] and the rest, in
 //!    any order, as many times as the caller likes. A responder may refuse
 //!    any it did not advertise in its [`Capability`] list.
-//! 4. [`Request::Close`] -- the responder releases the device and stops.
+//!
+//!    The set is deliberately small, and is meant to grow only alongside
+//!    something that uses it. A message nobody sends and nobody implements
+//!    is not a head start -- it is a design decision taken in advance of the
+//!    thing that would have informed it, which is how `apps_install` came to
+//!    assume one TBF at a time before any app-speaking transport existed.
+//! 4. [`Request::Close`] -- the responder **releases the device** and stops.
+//!    Releasing it means leaving it able to run: a transport that stopped a
+//!    core to do its work has to start it again, and one that changed flash
+//!    should reset so the device runs what is now on it. Hanging up with the
+//!    target halted is not releasing it, however tidy the shutdown.
 //!
 //! # How it travels
 //!
@@ -79,16 +89,6 @@ pub enum Request {
     Write {
         address: u64,
     },
-    Hash {
-        address: u64,
-        len: u64,
-    },
-    AppsList,
-    /// Payload: one TBF.
-    AppsInstall,
-    AppsRemove {
-        name: String,
-    },
     Reset,
     Vendor {
         name: String,
@@ -112,13 +112,6 @@ pub enum Response {
     Ok,
     /// Payload carries the data.
     Data,
-    /// SHA-256, hex.
-    Hash {
-        sha256: String,
-    },
-    Apps {
-        apps: Vec<AppInfo>,
-    },
     Vendor {
         value: serde_json::Value,
     },
@@ -230,13 +223,7 @@ pub enum Capability {
     /// device's erase granularity: if erasing destroys more than was sent, it
     /// is the transport's job to preserve the rest.
     MemoryWrite,
-    /// `hash` a range without transferring it.
-    MemoryHash,
-    /// App-level `apps_list` / `apps_install` / `apps_remove`, e.g. dynamic
-    /// loading into a running kernel.
-    Apps,
     Reset,
-    Console,
     /// Namespaced vendor operations, passed through untouched.
     Vendor(String),
 }
@@ -314,13 +301,6 @@ pub enum ErrorKind {
     Selection,
     Device,
     InvalidRequest,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AppInfo {
-    pub name: String,
-    pub address: Option<u64>,
-    pub size: u64,
 }
 
 // ---------------------------------------------------------------------------

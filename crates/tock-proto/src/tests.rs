@@ -84,10 +84,10 @@ fn io_errors_convert_into_device_responses() {
 
 #[test]
 fn multi_word_wire_names_are_snake_case() {
-    let s = serde_json::to_string(&Request::AppsList).unwrap();
-    assert_eq!(s, r#"{"op":"apps_list"}"#);
-    let s = serde_json::to_string(&Request::AppsRemove { name: "a".into() }).unwrap();
-    assert_eq!(s, r#"{"op":"apps_remove","name":"a"}"#);
+    // No request op is two words any more, so the variants that carry the
+    // convention are the enums beside them and the fields within.
+    let s = serde_json::to_string(&Request::Reset).unwrap();
+    assert_eq!(s, r#"{"op":"reset"}"#);
     let s = serde_json::to_string(&Capability::MemoryRead).unwrap();
     assert_eq!(s, r#""memory_read""#);
     let s = serde_json::to_string(&ErrorKind::InvalidRequest).unwrap();
