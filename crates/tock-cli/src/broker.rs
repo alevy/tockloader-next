@@ -53,7 +53,9 @@ fn fatal(e: CliError) -> ProtoError {
         Code::Capability => tock_proto::ErrorKind::Unsupported,
         _ => tock_proto::ErrorKind::Device,
     };
-    let error = ProtoError::failed(e.message).with_kind(kind);
+    let error = ProtoError::failed(e.message)
+        .with_kind(kind)
+        .detailed(e.details);
     if e.hints.is_empty() {
         error
     } else {
@@ -78,6 +80,7 @@ impl Connection for Broker {
                         transport: link.transport.clone(),
                         version: env!("CARGO_PKG_VERSION").into(),
                         capabilities: link.capabilities.clone(),
+                        options: link.options.clone(),
                     },
                     vec![],
                 ))

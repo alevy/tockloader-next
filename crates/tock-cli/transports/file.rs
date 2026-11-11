@@ -10,7 +10,28 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use tock_proto::{Capability, Connection, ErrorKind, FlashInfo, Options, Request, Response};
+use tock_proto::{
+    Capability, Connection, ErrorKind, FlashInfo, OptionSpec, Options, Request, Response,
+};
+
+/// Every option this transport reads. Declared rather than merely
+/// documented: `tock` refuses a key that is not here, so this is also what
+/// keeps a typo from being swallowed.
+fn options() -> Vec<OptionSpec> {
+    [
+        ("path", "the flash image standing in for the board"),
+        (
+            "create",
+            "create an erased image if the file does not exist",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, description)| OptionSpec {
+        name: name.into(),
+        description: description.into(),
+    })
+    .collect()
+}
 
 #[derive(Default)]
 pub struct FileTransport {
@@ -22,15 +43,15 @@ impl FileTransport {
         // `get_path`, not `get_str`: a relative path belongs to the file it was
         // written in, not to whatever directory the command was run from.
         let Some(path) = options.get_path("path") else {
-            return Response::Error {
-                kind: ErrorKind::Selection,
-                message: "the file transport needs a flash image path".into(),
-                suggestion: Some(
-                    "add --opt path=flash.bin --opt create=true\n\
-                     or add `[transports.file]` with `path = \"flash.bin\"` to a Tock.toml"
-                        .into(),
-                ),
-            };
+            return Response::error(
+                ErrorKind::Selection,
+                "the file transport needs a flash image path",
+            )
+            .with_suggestion(
+                "add --opt path=flash.bin --opt create=true\n\
+                 or add `[transports.file]` with `path = \"flash.bin\"` to a Tock.toml",
+            )
+            .about(["path"]);
         };
         let path = path.display().to_string();
         let create = options
@@ -39,16 +60,16 @@ impl FileTransport {
             .unwrap_or(false);
         let exists = std::path::Path::new(&path).exists();
         if !exists && !create {
-            return Response::Error {
-                kind: ErrorKind::Selection,
-                message: format!("flash image `{path}` does not exist"),
-                suggestion: Some(
-                    "add --opt create=true to create it\n\
-                     or point `path` at an image that exists, in Tock.toml's \
-                     `[transports.file]` or with --opt path=..."
-                        .into(),
-                ),
-            };
+            return Response::error(
+                ErrorKind::Selection,
+                format!("flash image `{path}` does not exist"),
+            )
+            .with_suggestion(
+                "add --opt create=true to create it\n\
+                 or point `path` at an image that exists, in Tock.toml's \
+                 `[transports.file]` or with --opt path=...",
+            )
+            .about(["path", "create"]);
         }
         let file = match OpenOptions::new()
             .read(true)
@@ -130,6 +151,7 @@ impl Connection for FileTransport {
                     transport: "file".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
                     capabilities: vec![Capability::MemoryRead, Capability::MemoryWrite],
+                    options: options(),
                 },
                 vec![],
             )),

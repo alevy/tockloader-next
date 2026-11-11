@@ -167,6 +167,11 @@ fn inherited_error(raw: &str) -> CliError {
     };
     let message = value["message"].as_str().unwrap_or(raw).to_string();
     let mut error = CliError::new(Code::Config, message);
+    for detail in value["details"].as_array().into_iter().flatten() {
+        if let Some(detail) = detail.as_str() {
+            error = error.detail(detail);
+        }
+    }
     for hint in value["hints"].as_array().into_iter().flatten() {
         if let Some(hint) = hint.as_str() {
             error = error.hint(hint);
@@ -190,12 +195,16 @@ pub fn finish(result: Result<(), CliError>) -> std::process::ExitCode {
                     "{}",
                     serde_json::json!({
                         "error": e.message,
+                        "details": e.details,
                         "hints": e.hints,
                         "code": e.code as u8,
                     })
                 );
             } else {
                 eprintln!("error: {}", e.message);
+                for detail in &e.details {
+                    eprintln!("  {detail}");
+                }
                 for hint in &e.hints {
                     eprintln!("  try: {hint}");
                 }
@@ -233,11 +242,15 @@ pub fn proto(e: ProtoError) -> CliError {
     };
     let mut error = CliError::new(code, e.to_string());
     if let ProtoError::Failed {
-        suggestion: Some(hint),
+        suggestion,
+        details,
         ..
     } = &e
     {
-        for line in hint.lines() {
+        for detail in details {
+            error = error.detail(detail);
+        }
+        for line in suggestion.iter().flat_map(|s| s.lines()) {
             error = error.hint(line);
         }
     }

@@ -6,13 +6,16 @@
 //! comes back as a status plus whatever openocd logged while running it, so a
 //! failure reaches the user in openocd's own words instead of as a number.
 //!
-//! Options:
-//! - `config`: openocd config files, a string or a list. An entry that names a
-//!   file next to the config that declared it is resolved to that file;
-//!   anything else is passed through for openocd's own script search path, so
-//!   `board/nordic_nrf52_dk.cfg` keeps working.
-//! - `command`: the openocd executable (default `openocd`).
-//! - `debug_level`: openocd's log verbosity (default 2).
+//! The options are declared in [`options`], which is what `tock transports`
+//! prints and what `tock` holds this end to -- a key not named there never
+//! arrives. Two of them want more than a line:
+//!
+//! - `config`, `target` and `probe` take openocd config files, a string or a
+//!   list. An entry naming a file next to the config that declared it is
+//!   resolved to that file; anything else passes through for openocd's own
+//!   script search path, so `board/nordic_nrf52_dk.cfg` keeps working.
+//! - `page_size` is the flash erase unit and has no default, because
+//!   guessing one is how a write takes a neighbour with it.
 //!
 //! The target is halted for the life of the session: flash operations need it,
 //! and leaving it halted keeps every request working the same way.
@@ -25,8 +28,39 @@ use std::time::{Duration, Instant};
 
 use tempfile::NamedTempFile;
 use tock_proto::{
-    Capability, Connection, ErrorKind, FlashInfo, Options, ProtoError, Request, Response,
+    Capability, Connection, ErrorKind, FlashInfo, OptionSpec, Options, ProtoError, Request,
+    Response,
 };
+
+/// Every option this transport reads. Declared rather than merely
+/// documented: `tock` refuses a key that is not here, so this is also what
+/// keeps a typo from being swallowed. What a *good* value is stays here,
+/// checked at `Open`, because only this end knows.
+fn options() -> Vec<OptionSpec> {
+    [
+        ("page_size", "the flash erase unit, a power of two"),
+        ("command", "the openocd executable (default `openocd`)"),
+        ("debug_level", "openocd's log verbosity (default 2)"),
+        (
+            "target",
+            "config for the chip: the same for everyone with this board",
+        ),
+        (
+            "probe",
+            "config for the debug adapter plugged into this machine",
+        ),
+        (
+            "config",
+            "the whole config stage, instead of `target` and `probe`",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, description)| OptionSpec {
+        name: name.into(),
+        description: description.into(),
+    })
+    .collect()
+}
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const STARTUP_POLL: Duration = Duration::from_millis(10);
@@ -137,6 +171,7 @@ fn page_size_from(configured: Option<u64>) -> Result<u64, Response> {
             "add --opt page_size=4096\n\
              or give the board file a [transports.openocd] page_size entry",
         )
+        .about(["page_size"])
     };
     match configured {
         None => Err(missing()),
@@ -144,7 +179,8 @@ fn page_size_from(configured: Option<u64>) -> Result<u64, Response> {
             ErrorKind::Selection,
             format!("page_size {v} cannot be a flash erase unit: it must be a power of two"),
         )
-        .with_suggestion("check [transports.openocd] page_size, e.g. page_size = 4096")),
+        .with_suggestion("check [transports.openocd] page_size, e.g. page_size = 4096")
+        .about(["page_size"])),
         Some(v) => Ok(v),
     }
 }
@@ -251,6 +287,7 @@ fn resolve_configs(options: &Options<'_>) -> Result<Vec<Step>, Failure> {
                 "`config` is the whole config stage; `probe` and `target` are its two \
                  halves.\nUse one or the other.",
             )
+            .about(["config", *key])
             .into());
         }
         return steps(options, "config");
@@ -525,6 +562,7 @@ impl OpenocdTransport {
                  your user config should give it a `probe` for what you have plugged in,\n\
                  e.g. [transports.openocd] probe = [\"interface/jlink.cfg\"]",
             )
+            .about(["target", "probe", "config"])
             .into());
         }
         let command = options
@@ -614,6 +652,7 @@ impl OpenocdTransport {
                         Capability::MemoryWrite,
                         Capability::Reset,
                     ],
+                    options: options(),
                 },
                 vec![],
             )),
