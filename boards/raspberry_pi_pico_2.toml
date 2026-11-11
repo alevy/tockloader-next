@@ -41,3 +41,11 @@ probe = ["interface/cmsis-dap.cfg", { command = "transport select swd" }]
 
 [transports.probe-rs]
 chip = "RP235x"
+
+# The console, reached with `tock --transport serial console`. The baud is
+# the board's; the port is not -- which `/dev/tty*` a bridge lands on depends
+# on what else is plugged in, so it belongs in your user config:
+#   [transports.serial]
+#   port = "/dev/ttyACM0"
+[transports.serial]
+baud = 115200

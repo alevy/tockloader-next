@@ -232,7 +232,7 @@ pub fn transports(g: &crate::cli::Global) -> Result<(), CliError> {
                 let can: Vec<String> = entry.capabilities.iter().map(|c| c.name()).collect();
                 println!("{:<14} {:<9} {}", entry.name, entry.version, can.join(" "));
                 for option in &entry.options {
-                    println!("  {:<12} {}", option.name, option.description);
+                    println!("  {:<14} {}", option.name, option.description);
                 }
             }
         }

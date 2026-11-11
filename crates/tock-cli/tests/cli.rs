@@ -3,6 +3,7 @@
 //! The `python_*` tests compare against Python tockloader byte for byte. They
 //! run only when `TOCKLOADER_PY` points at a `tockloader` executable.
 
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -1176,4 +1177,131 @@ fn transports_lists_what_each_one_reads() {
     assert_eq!(options, vec!["path", "create"]);
     // The same list the refusal above quotes, from the same source.
     assert_eq!(file["capabilities"][0], "memory_read");
+}
+
+// --- console -------------------------------------------------------------
+
+/// A pseudo-terminal pair, which is a serial port for every purpose this
+/// transport has: `termios` applies, `poll` works, and bytes written to one
+/// end arrive at the other. It stands in for a board without needing one.
+fn pty() -> (std::fs::File, std::fs::File, PathBuf) {
+    use std::os::fd::FromRawFd;
+    let mut manager = 0;
+    let mut device = 0;
+    // SAFETY: two out-parameters we own, and null for the optional settings.
+    let made = unsafe {
+        libc::openpty(
+            &mut manager,
+            &mut device,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    assert_eq!(made, 0, "openpty");
+    // SAFETY: freshly opened by `openpty` and not owned elsewhere.
+    let name = unsafe {
+        let raw = libc::ptsname(manager);
+        assert!(!raw.is_null(), "ptsname");
+        std::ffi::CStr::from_ptr(raw).to_string_lossy().into_owned()
+    };
+    // Both sides stay open. A pty with no device side open answers reads
+    // on the manager with EIO, and the transport opens the device by name
+    // in another process -- so this one is held purely to keep the pair
+    // alive, and never read from.
+    // SAFETY: both are ours, freshly opened, and closed nowhere else.
+    unsafe {
+        (
+            std::fs::File::from_raw_fd(manager),
+            std::fs::File::from_raw_fd(device),
+            PathBuf::from(name),
+        )
+    }
+}
+
+/// The whole path: a transport that declares only `console`, a client that
+/// requires it, and bytes travelling in both directions over one strictly
+/// synchronous connection.
+#[test]
+fn the_console_carries_bytes_both_ways() {
+    use std::io::{Read, Write};
+
+    let d = Dir::new("console-pty");
+    let (mut board, _keepalive, port) = pty();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args([
+            "--board",
+            "nrf52840dk",
+            "--transport",
+            "serial",
+            "--opt",
+            &format!("port={}", port.display()),
+            // No pacing: a pty keeps up, and the test should not wait.
+            "--opt",
+            "write_pace_ms=0",
+            "console",
+        ])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("no-user-config.toml"))
+        .env("TOCK_PROJECT", d.path("Tock.toml"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // The transport has to spawn, greet and open before any of this lands.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    // Device to terminal.
+    board.write_all(b"tock$ ").unwrap();
+    board.flush().unwrap();
+
+    // Terminal to device: the client forwards whatever it is given.
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"list\n").unwrap();
+    stdin.flush().unwrap();
+
+    // Non-blocking, so a quiet moment is not a hang.
+    // SAFETY: a descriptor we own.
+    unsafe { libc::fcntl(board.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+    let mut heard = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !heard.windows(5).any(|w| w == b"list\n") {
+        let mut buffer = [0u8; 256];
+        match board.read(&mut buffer) {
+            Ok(0) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Ok(n) => heard.extend_from_slice(&buffer[..n]),
+            // Nothing yet, or the device side is between opens.
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    let _ = child.kill();
+    let printed = child.wait_with_output().unwrap().stdout;
+
+    assert!(
+        heard.windows(5).any(|w| w == b"list\n"),
+        "the device never heard it: {:?}",
+        String::from_utf8_lossy(&heard)
+    );
+    assert!(
+        printed.windows(6).any(|w| w == b"tock$ "),
+        "the terminal never showed it: {:?}",
+        String::from_utf8_lossy(&printed)
+    );
+}
+
+/// A transport that cannot do consoles says so, rather than the client
+/// discovering it one request later.
+#[test]
+fn a_transport_without_a_console_refuses_up_front() {
+    let d = Dir::new("console-unsupported");
+    let image = d.erased("flash.bin");
+    let opt = format!("path={}", image.display());
+    let out = tock(&d, &on_file(&opt, &["console"]));
+    assert!(!out.status.success());
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(why.contains("console"), "{why}");
+    assert!(why.contains("capability"), "{why}");
 }

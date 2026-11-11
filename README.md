@@ -11,9 +11,10 @@ crates/tock-proto  draft device protocol and framing
 crates/tock-cli    the `tock` binary, the subcommands and transports we ship
 ```
 
-`tock-cli` builds six binaries: `tock` itself, the `tock-install`,
-`tock-uninstall` and `tock-list` subcommands, and the `tock-transport-file`
-and `tock-transport-openocd` transports. They share a crate because we ship
+`tock-cli` builds eight binaries: `tock` itself, the `tock-install`,
+`tock-uninstall`, `tock-list` and `tock-console` subcommands, and the
+`tock-transport-file`, `tock-transport-openocd` and `tock-transport-serial`
+transports. They share a crate because we ship
 them together, not because anything in the architecture joins them -- each is
 reached exactly the way a third party's would be.
 
@@ -91,6 +92,16 @@ create = true
 [[app]]
 tab = "blink.tab"
 ```
+
+A board's console is usually not reachable the way its flash is -- a
+USB-to-UART bridge is a console and nothing else -- so it is a transport of
+its own, asked for by name:
+
+```sh
+tock --transport serial --opt port=/dev/ttyUSB0 console
+```
+
+`tock transports` lists what is installed and what each one reads.
 
 Then `tock install`, with no flags, from anywhere in the project. Relative
 paths resolve against the file they were written in, not the working

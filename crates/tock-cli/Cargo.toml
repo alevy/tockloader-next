@@ -23,12 +23,20 @@ name = "tock-list"
 path = "clients/list.rs"
 
 [[bin]]
+name = "tock-console"
+path = "clients/console.rs"
+
+[[bin]]
 name = "tock-transport-file"
 path = "transports/file.rs"
 
 [[bin]]
 name = "tock-transport-openocd"
 path = "transports/openocd.rs"
+
+[[bin]]
+name = "tock-transport-serial"
+path = "transports/serial.rs"
 
 [dependencies]
 tbf.workspace = true
