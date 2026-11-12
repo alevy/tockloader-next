@@ -665,7 +665,7 @@ fn env_sets_transport_options() {
         .current_dir(&d.0)
         .env("TOCK_CONFIG", d.path("no-user-config.toml"))
         .env("TOCK_PROJECT", d.path("Tock.toml"))
-        .env("TOCK_OPT_PATH", "other.bin")
+        .env("TOCK_OPTS", "path=other.bin")
         .output()
         .unwrap();
     ok(out);
@@ -1503,4 +1503,52 @@ fn an_alias_board_path_resolves_against_the_user_config() {
     let shown = ok(out);
     assert!(shown.contains("board      mine"), "{shown}");
     assert!(shown.contains("device `lab` in user config"), "{shown}");
+}
+
+/// What `tock` selected, a subcommand can ask `tock` about and get the same
+/// answer. The board and the transport were already forwarded; the options
+/// were not, so the one part a flag had set was the one part that differed.
+///
+/// A qualified option is the case the old `TOCK_OPT_<KEY>` could not carry
+/// at all, since there was nowhere to put the transport.
+#[test]
+fn a_subcommand_can_ask_tock_what_was_selected() {
+    let d = Dir::new("forward_opts");
+    let bin = d.path("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // A subcommand that re-invokes `tock` rather than using what it was
+    // handed, which is the case the forwarding exists for.
+    let asks = bin.join("tock-asks");
+    std::fs::write(&asks, "#!/bin/sh\nexec tock config show\n").unwrap();
+    std::fs::set_permissions(&asks, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let ours = PathBuf::from(env!("CARGO_BIN_EXE_tock"));
+    let path = format!(
+        "{}:{}:{}",
+        bin.display(),
+        ours.parent().unwrap().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new(&ours)
+        .args([
+            "--board",
+            "nrf52840dk",
+            "--opt",
+            "path=flash.bin",
+            "--opt",
+            "serial.port=/dev/ttyUSB0",
+            "asks",
+        ])
+        .current_dir(&d.0)
+        .env("PATH", path)
+        .env("TOCK_CONFIG", d.path("no-user-config.toml"))
+        .env("TOCK_PROJECT", d.path("Tock.toml"))
+        .output()
+        .unwrap();
+    let shown = ok(out);
+
+    assert!(shown.contains(r#"path = "flash.bin""#), "{shown}");
+    assert!(shown.contains(r#"port = "/dev/ttyUSB0""#), "{shown}");
+    // And it says it came from the environment, because in the child it did.
+    assert!(shown.contains("env TOCK_OPTS serial.port"), "{shown}");
 }

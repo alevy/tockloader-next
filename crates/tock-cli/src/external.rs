@@ -12,7 +12,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
-use tock_board::Context;
+use tock_board::{Context, OptionOverride};
 
 use crate::broker::Broker;
 use crate::cli::Global;
@@ -129,6 +129,11 @@ pub(crate) fn external(g: &Global, args: Vec<String>) -> Result<(), CliError> {
     // so the child inherits it. These are forwarded for a subcommand that
     // re-invokes `tock` for something other than a device -- `tock config
     // show`, say. Reaching the device does not need them: fd 3 is for that.
+    //
+    // All of what was selected, not some: forwarding the board and the
+    // transport but not the options meant a subcommand asking `tock` what it
+    // had resolved got a different answer than its parent, with the
+    // difference being exactly the part a flag had set.
     for (name, v) in [
         ("TOCK_BOARD", &g.board),
         ("TOCK_TRANSPORT", &g.transport),
@@ -137,6 +142,10 @@ pub(crate) fn external(g: &Global, args: Vec<String>) -> Result<(), CliError> {
         if let Some(v) = v {
             cmd.env(name, v);
         }
+    }
+    if !g.options.is_empty() {
+        let written: Vec<String> = g.options.iter().map(OptionOverride::written).collect();
+        cmd.env("TOCK_OPTS", written.join("\n"));
     }
 
     // One end of this is ours to serve; the other becomes the child's fd 3.

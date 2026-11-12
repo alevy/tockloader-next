@@ -243,7 +243,7 @@ fn env_options_beat_project_and_lose_to_flags() {
     assert_eq!(options(&ctx)["path"].value.as_str(), Some("from-env"));
     assert_eq!(
         options(&ctx)["path"].source,
-        Source::Env("TOCK_OPT_PATH".into())
+        Source::Env("TOCK_OPTS path".into())
     );
 
     let flags = Layer {
@@ -321,18 +321,34 @@ fn no_guessing() {
     assert!(matches!(err, Error::UnknownBoard(_)));
 }
 
+/// One grammar for the flag and the variable, so what `tock` writes for a
+/// subcommand is what a person could have typed.
 #[test]
-fn env_option_names_round_trip_without_rewriting_separators() {
-    // Keys are snake_case, so the mapping is just case: no separator is
-    // rewritten, and a multi-word key is reachable from the environment.
-    assert_eq!(env_option_var("chip_name"), "TOCK_OPT_CHIP_NAME");
+fn an_option_round_trips_through_the_way_it_is_written() {
+    let round = |given: &str| OptionOverride::parse(given).unwrap().written();
+    assert_eq!(round("path=flash.bin"), "path=flash.bin");
     assert_eq!(
-        env_option_key("TOCK_OPT_CHIP_NAME").as_deref(),
-        Some("chip_name")
+        round("serial.port=/dev/ttyUSB0"),
+        "serial.port=/dev/ttyUSB0"
     );
-    assert_eq!(env_option_key("TOCK_OPT_PATH").as_deref(), Some("path"));
-    assert_eq!(env_option_key("TOCK_OPT_"), None);
-    assert_eq!(env_option_key("TOCK_BOARD"), None);
+    // A key may contain the separator the qualifier uses, because only the
+    // first dot splits.
+    assert_eq!(round("openocd.a.b=1"), "openocd.a.b=1");
+    // And a value may contain anything, including the `=` that found it.
+    assert_eq!(round("command=a=b"), "command=a=b");
+
+    assert!(OptionOverride::parse("no-equals").is_err());
+    assert!(OptionOverride::parse("serial.=x").is_err());
+}
+
+/// A key with underscores is why the per-key variables had to go:
+/// `TOCK_OPT_SERIAL_PORT` could not be told from an option named
+/// `serial_port`, so the environment could never name a transport.
+#[test]
+fn a_qualifier_survives_a_key_that_contains_underscores() {
+    let over = OptionOverride::parse("openocd.page_size=4096").unwrap();
+    assert_eq!(over.transport.as_deref(), Some("openocd"));
+    assert_eq!(over.key, "page_size");
 }
 
 #[test]

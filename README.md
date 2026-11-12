@@ -125,7 +125,8 @@ port = "/dev/ttyUSB0"    # your desk, not about the board
 
 On the command line an option names its transport the way the table header
 does -- `--opt serial.port=/dev/ttyUSB0` is that same two lines written flat.
-Unqualified, it means whichever transport serves `default`.
+Unqualified, it means whichever transport serves `default`. `TOCK_OPTS` takes
+the same syntax, one option per line.
 
 Then `tock list` reaches the flash and `tock console` reaches the console,
 neither naming a transport. `tock transports` lists what is installed and
@@ -152,7 +153,7 @@ groups and are provisional for three different reasons.
 
 | | |
 |---|---|
-| `TOCK_BOARD`, `TOCK_TRANSPORT`, `TOCK_DEVICE`, `TOCK_OPT_<KEY>` | A resolution layer duplicating what flags and files already say, and the only one that cannot express everything they can: `TOCK_OPT_SERIAL_PORT` cannot be told from an option named `serial_port`, so it reaches the default transport and no other. Whether the layer earns its place at all is open. |
+| `TOCK_BOARD`, `TOCK_TRANSPORT`, `TOCK_DEVICE`, `TOCK_OPTS` | A resolution layer duplicating what flags and files already say. Whether it earns its place at all is open. `TOCK_OPTS` takes the same `[transport.]key=value` as `--opt`, one per line, and is what `tock` hands a subcommand so that asking `tock` what was selected gives the same answer twice. |
 | `TOCK_CONTEXT`, `TOCK_CONTEXT_ERROR`, `TOCK_CONNECTION`, `TOCK_FORMAT` | How `tock` hands off to a subcommand, and so what a third-party `tock-<name>` binds to. The protocol is version 0 and this travels with it. |
 | `TOCK_CONFIG`, `TOCK_PROJECT` | Escape hatches for tests and CI, which pin the user config and project file. Useful, undesigned. |
 

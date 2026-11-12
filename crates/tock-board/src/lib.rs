@@ -15,7 +15,7 @@ pub use config::{
 };
 pub use resolve::{
     Board, Context, Inputs, Layer, OptionOverride, Settings, Source, Sourced, TransportContext,
-    env_option_key, resolve,
+    resolve,
 };
 pub use size::Size;
 

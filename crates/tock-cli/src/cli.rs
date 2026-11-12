@@ -84,31 +84,10 @@ pub(crate) enum ConfigCommand {
     Show,
 }
 
-/// `--opt [transport.]key=value`, which is the TOML path written flat.
-///
-/// The qualifier is the table header: `serial.port=X` says exactly what
-/// `[transports.serial] port = X` says. Without one, it is the transport
-/// serving `default` -- the obvious one, for the common case where there is
-/// only ever one in play.
-///
-/// Only the first dot splits, so an option key may contain dots even though
-/// none does today.
+/// `--opt [transport.]key=value`. The grammar lives with the type, because
+/// `TOCK_OPTS` carries the same thing.
 pub(crate) fn parse_opt(s: &str) -> Result<OptionOverride, String> {
-    let (name, value) = s
-        .split_once('=')
-        .ok_or_else(|| format!("expected [transport.]key=value, got `{s}`"))?;
-    let (transport, key) = match name.split_once('.') {
-        Some((transport, key)) => (Some(transport.to_string()), key),
-        None => (None, name),
-    };
-    if key.is_empty() {
-        return Err(format!("`{s}` has no option name"));
-    }
-    Ok(OptionOverride {
-        transport,
-        key: key.to_string(),
-        value: value.to_string(),
-    })
+    OptionOverride::parse(s)
 }
 
 /// The parser, plus one subcommand per `tock-*` binary on this machine.

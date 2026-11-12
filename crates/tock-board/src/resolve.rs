@@ -2,10 +2,10 @@
 //! one [`Settings`].
 //!
 //! The environment layer is **experimental**. It duplicates what flags and
-//! files already say, and is the only layer that cannot express everything
-//! they can: `TOCK_OPT_SERIAL_PORT` cannot be told from an option named
-//! `serial_port`, so it reaches the default transport and no other. Whether
-//! it earns its place is open -- see the README.
+//! files already say, and whether it earns its place is open -- see the
+//! README. It is at least no longer less expressive than they are:
+//! `TOCK_OPTS` carries the same `[transport.]key=value` the flag does, one
+//! per line, where `TOCK_OPT_<KEY>` could not say which transport it meant.
 //!
 //! Layering, highest first. It is not one order for everything: the
 //! settings differ in how they combine, and a single list presented as
@@ -103,6 +103,44 @@ pub struct OptionOverride {
 }
 
 impl OptionOverride {
+    /// `[transport.]key=value`, which is the TOML path written flat.
+    ///
+    /// The qualifier is the table header: `serial.port=X` says exactly what
+    /// `[transports.serial] port = X` says. Without one, it is the transport
+    /// serving [`DEFAULT_ROUTE`].
+    ///
+    /// Here rather than beside the flag parser because a variable carries
+    /// the same thing in the same syntax, and two parsers for one grammar is
+    /// how they come to disagree.
+    ///
+    /// Only the first dot splits, so an option key may contain dots even
+    /// though none does today.
+    pub fn parse(given: &str) -> Result<OptionOverride, String> {
+        let (name, value) = given
+            .split_once('=')
+            .ok_or_else(|| format!("expected [transport.]key=value, got `{given}`"))?;
+        let (transport, key) = match name.split_once('.') {
+            Some((transport, key)) => (Some(transport.to_string()), key),
+            None => (None, name),
+        };
+        if key.is_empty() {
+            return Err(format!("`{given}` has no option name"));
+        }
+        Ok(OptionOverride {
+            transport,
+            key: key.to_string(),
+            value: value.to_string(),
+        })
+    }
+
+    /// How it is written, which is how it is parsed back.
+    pub fn written(&self) -> String {
+        match &self.transport {
+            Some(transport) => format!("{transport}.{}={}", self.key, self.value),
+            None => format!("{}={}", self.key, self.value),
+        }
+    }
+
     /// Whether this applies to the transport `name`, given what `default`
     /// routes to.
     fn applies_to(&self, name: &str, default: Option<&str>) -> bool {
@@ -114,7 +152,7 @@ impl OptionOverride {
 
     /// How it is named when something has to be said about where it came
     /// from.
-    fn written(&self) -> String {
+    fn named(&self) -> String {
         match &self.transport {
             Some(transport) => format!("{transport}.{}", self.key),
             None => self.key.clone(),
@@ -482,7 +520,7 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Erro
                     over.key.clone(),
                     Sourced {
                         value: parse_option_value(&over.value),
-                        source: Source::Env(env_option_var(&over.key)),
+                        source: Source::Env(format!("TOCK_OPTS {}", over.named())),
                     },
                 );
             }
@@ -493,7 +531,7 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Erro
                     over.key.clone(),
                     Sourced {
                         value: parse_option_value(&over.value),
-                        source: Source::Flag(format!("--opt {}", over.written())),
+                        source: Source::Flag(format!("--opt {}", over.named())),
                     },
                 );
             }
@@ -589,20 +627,6 @@ fn parse_option_value(raw: &str) -> toml::Value {
         .ok()
         .and_then(|mut t| t.remove("v"))
         .unwrap_or_else(|| toml::Value::String(raw.to_string()))
-}
-
-/// The environment variable an option key is read from. Option keys are
-/// snake_case, so this is case alone: `chip_name` is `TOCK_OPT_CHIP_NAME`,
-/// and every key is reachable from the environment.
-fn env_option_var(key: &str) -> String {
-    format!("TOCK_OPT_{}", key.to_uppercase())
-}
-
-/// The option key an environment variable name carries, if it is one.
-pub fn env_option_key(var: &str) -> Option<String> {
-    var.strip_prefix("TOCK_OPT_")
-        .filter(|rest| !rest.is_empty())
-        .map(|rest| rest.to_lowercase())
 }
 
 fn pick(layers: &[(Option<&String>, Source)]) -> Option<Sourced<String>> {
