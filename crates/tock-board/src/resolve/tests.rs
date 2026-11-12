@@ -6,6 +6,15 @@ use super::*;
 /// here resolves a single transport, so this is unambiguous -- and keeping
 /// it in one place means the routing change did not scatter lookups through
 /// twenty assertions.
+/// An override with no transport named, which means the default route.
+fn unqualified(key: &str, value: &str) -> OptionOverride {
+    OptionOverride {
+        transport: None,
+        key: key.into(),
+        value: value.into(),
+    }
+}
+
 fn options(ctx: &Settings) -> &BTreeMap<String, Sourced<toml::Value>> {
     let name = &ctx
         .transport
@@ -112,7 +121,7 @@ fn precedence_flag_over_alias_over_project_over_user() {
 
     let flags = Layer {
         transport: Some("openocd".into()),
-        options: vec![("speed".into(), "100".into())],
+        options: vec![unqualified("speed", "100")],
         ..Default::default()
     };
     let ctx = resolve(
@@ -196,7 +205,7 @@ fn env_options_beat_project_and_lose_to_flags() {
     )
     .unwrap();
     let env_layer = || Layer {
-        options: vec![("path".into(), "from-env".into())],
+        options: vec![unqualified("path", "from-env")],
         ..Default::default()
     };
 
@@ -210,7 +219,7 @@ fn env_options_beat_project_and_lose_to_flags() {
     );
 
     let flags = Layer {
-        options: vec![("path".into(), "from-flag".into())],
+        options: vec![unqualified("path", "from-flag")],
         ..Default::default()
     };
     let mut i = inputs(flags, Some(("Tock.toml".into(), &project)), None);
@@ -373,4 +382,94 @@ fn layout_is_validated() {
     "#;
     let err = BoardFile::parse("x.toml", bad).unwrap_err().to_string();
     assert!(err.contains("overlaps layout.kernel"), "{err}");
+}
+
+/// `--opt serial.port=X` is `[transports.serial] port = X` written flat.
+/// The qualifier is the table header, so it reaches a transport whether or
+/// not that transport is the default one.
+#[test]
+fn a_qualified_option_reaches_only_the_transport_it_names() {
+    let qualified = |transport: &str, key: &str, value: &str| OptionOverride {
+        transport: Some(transport.into()),
+        key: key.into(),
+        value: value.into(),
+    };
+    let project = ProjectFile {
+        board: Some("nrf52840dk".into()),
+        transport: Some(Transport::Routed(BTreeMap::from([
+            ("default".to_string(), "openocd".to_string()),
+            ("console".to_string(), "serial".to_string()),
+        ]))),
+        ..Default::default()
+    };
+    let flags = Layer {
+        options: vec![
+            qualified("serial", "port", "/dev/ttyUSB0"),
+            // Unqualified: the default route's, which is openocd here.
+            unqualified("page_size", "8192"),
+        ],
+        ..Default::default()
+    };
+    let ctx = resolve(
+        &inputs(flags, Some(("Tock.toml".into(), &project)), None),
+        &Files(vec![]),
+    )
+    .unwrap();
+
+    let openocd = &ctx.transport.options["openocd"];
+    let serial = &ctx.transport.options["serial"];
+    assert_eq!(openocd["page_size"].value.as_integer(), Some(8192));
+    assert!(
+        !openocd.contains_key("port"),
+        "a qualified option must not leak to another transport"
+    );
+    assert_eq!(serial["port"].value.as_str(), Some("/dev/ttyUSB0"));
+    assert!(
+        !serial.contains_key("page_size"),
+        "an unqualified option is the default route's alone"
+    );
+    // And it says so, so `config show` can explain where it came from.
+    assert_eq!(
+        serial["port"].source,
+        Source::Flag("--opt serial.port".into())
+    );
+}
+
+/// Without a default route there is no "the obvious one" to mean, and
+/// quietly dropping the value is the failure the option schema exists to
+/// prevent. The error says what to write instead.
+#[test]
+fn an_unqualified_option_needs_a_default_route() {
+    // A board reachable only one way, and not the default way: routes merge,
+    // so the board file must be the one that declines to name a default.
+    let files = Files(vec![(
+        "boards/console-only.toml",
+        r#"
+        [board]
+        name = "console-only"
+        arch = "cortex-m4"
+        [board.transport]
+        console = "serial"
+        [layout]
+        flash = { start = 0x0, size = "1M" }
+        kernel = { start = 0x0, size = "256K" }
+        apps = { start = 0x40000, size = "768K" }
+        "#,
+    )]);
+    let project = ProjectFile {
+        board: Some("boards/console-only.toml".into()),
+        ..Default::default()
+    };
+    let flags = Layer {
+        options: vec![unqualified("port", "/dev/ttyUSB0")],
+        ..Default::default()
+    };
+    let err = resolve(
+        &inputs(flags, Some(("Tock.toml".into(), &project)), None),
+        &files,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("does not say which transport"), "{err}");
+    assert!(err.contains("<transport>.port"), "{err}");
 }

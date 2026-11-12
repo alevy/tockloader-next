@@ -58,14 +58,47 @@ pub struct Sourced<T> {
     pub source: Source,
 }
 
+/// One option set from outside a file.
+///
+/// `transport` names which transport it is for, the way the table header
+/// does in a file: `--opt serial.port=X` is `[transports.serial] port = X`.
+/// Unqualified means the transport serving [`DEFAULT_ROUTE`], which is what
+/// someone overriding the obvious thing means.
+#[derive(Clone, Debug)]
+pub struct OptionOverride {
+    pub transport: Option<String>,
+    pub key: String,
+    pub value: String,
+}
+
+impl OptionOverride {
+    /// Whether this applies to the transport `name`, given what `default`
+    /// routes to.
+    fn applies_to(&self, name: &str, default: Option<&str>) -> bool {
+        match &self.transport {
+            Some(qualified) => qualified == name,
+            None => default == Some(name),
+        }
+    }
+
+    /// How it is named when something has to be said about where it came
+    /// from.
+    fn written(&self) -> String {
+        match &self.transport {
+            Some(transport) => format!("{transport}.{}", self.key),
+            None => self.key.clone(),
+        }
+    }
+}
+
 /// Settings given directly, by flags or environment variables.
 #[derive(Clone, Debug, Default)]
 pub struct Layer {
     pub board: Option<String>,
     pub transport: Option<String>,
     pub device: Option<String>,
-    /// Transport options as `key=value` (flags only).
-    pub options: Vec<(String, String)>,
+    /// Transport options given outside a file.
+    pub options: Vec<OptionOverride>,
 }
 
 pub struct Inputs<'a> {
@@ -356,10 +389,11 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Erro
         names.dedup();
         names
     };
+    let default = routes.get(DEFAULT_ROUTE).map(|s| s.value.clone());
     for name in routed {
         let mut resolved: BTreeMap<String, Sourced<toml::Value>> = BTreeMap::new();
-        let mut layer = |table: Option<&toml::Table>, source: Source| {
-            for (k, v) in table.into_iter().flatten() {
+        let mut layer = |table: Option<std::borrow::Cow<'_, toml::Table>>, source: Source| {
+            for (k, v) in table.iter().flat_map(|t| t.iter()) {
                 resolved.insert(
                     k.clone(),
                     Sourced {
@@ -370,37 +404,74 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Erro
             }
         };
         layer(
-            board.transport_options(&name),
+            board
+                .transport_options(&name)
+                .map(std::borrow::Cow::Borrowed),
             Source::Board(board_origin.clone()),
         );
         if let Some((origin, u)) = user {
-            layer(u.transports.get(&name), Source::User(origin.clone()));
+            layer(
+                u.transports.get(&name).map(std::borrow::Cow::Borrowed),
+                Source::User(origin.clone()),
+            );
         }
         if let Some((_, p)) = project {
-            layer(p.transports.get(&name), project_source());
+            layer(
+                p.transports.get(&name).map(std::borrow::Cow::Borrowed),
+                project_source(),
+            );
         }
         if let Some((_, a)) = &alias {
-            layer(Some(&a.options), alias_source());
-        }
-        for (k, v) in &inputs.env.options {
-            resolved.insert(
-                k.clone(),
-                Sourced {
-                    value: parse_option_value(v),
-                    source: Source::Env(env_option_var(k)),
-                },
+            // An alias may carry options for more than one transport, keyed
+            // the same way: a sub-table named for a routed transport is that
+            // transport's, and anything else is the default route's.
+            layer(
+                alias_options(&a.options, &name, default.as_deref()),
+                alias_source(),
             );
         }
-        for (k, v) in &inputs.flags.options {
-            resolved.insert(
-                k.clone(),
-                Sourced {
-                    value: parse_option_value(v),
-                    source: Source::Flag(format!("--opt {k}")),
-                },
-            );
+        for over in &inputs.env.options {
+            if over.applies_to(&name, default.as_deref()) {
+                resolved.insert(
+                    over.key.clone(),
+                    Sourced {
+                        value: parse_option_value(&over.value),
+                        source: Source::Env(env_option_var(&over.key)),
+                    },
+                );
+            }
+        }
+        for over in &inputs.flags.options {
+            if over.applies_to(&name, default.as_deref()) {
+                resolved.insert(
+                    over.key.clone(),
+                    Sourced {
+                        value: parse_option_value(&over.value),
+                        source: Source::Flag(format!("--opt {}", over.written())),
+                    },
+                );
+            }
         }
         options.insert(name, resolved);
+    }
+
+    // An unqualified override means "the default one", so without a default
+    // route it means nothing, and silently dropping it is the failure the
+    // option schema exists to prevent.
+    if default.is_none() {
+        let orphan = inputs
+            .flags
+            .options
+            .iter()
+            .chain(&inputs.env.options)
+            .find(|over| over.transport.is_none());
+        if let Some(over) = orphan {
+            return Err(Error::Invalid(format!(
+                "`{}` does not say which transport it is for, and this board has no \
+                 default route to assume -- write it as `<transport>.{}`",
+                over.key, over.key
+            )));
+        }
     }
 
     Ok(Settings {
@@ -414,6 +485,35 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Erro
         project: project.map(|(o, _)| o.clone()),
         user: user.map(|(o, _)| o.clone()),
     })
+}
+
+/// A device alias's options for one transport.
+///
+/// An alias names a board and how to reach it, which may be more than one
+/// way, so its options are keyed like everything else: a sub-table named
+/// for a routed transport belongs to that transport, and the rest belong to
+/// the default route. Matching against the routed names rather than "is it
+/// a table" keeps an option whose value is genuinely a table from being
+/// mistaken for a qualifier.
+fn alias_options<'a>(
+    options: &'a toml::Table,
+    name: &str,
+    default: Option<&str>,
+) -> Option<std::borrow::Cow<'a, toml::Table>> {
+    let qualified = options.get(name).and_then(|v| v.as_table());
+    if default != Some(name) {
+        return qualified.map(std::borrow::Cow::Borrowed);
+    }
+    // The default route's own options, with any qualifier tables removed so
+    // another transport's settings do not leak into it.
+    let mut plain = options.clone();
+    plain.retain(|_, v| !v.is_table());
+    if let Some(qualified) = qualified {
+        for (k, v) in qualified {
+            plain.insert(k.clone(), v.clone());
+        }
+    }
+    Some(std::borrow::Cow::Owned(plain))
 }
 
 /// Accept TOML values (numbers, booleans, arrays); anything else is a string.

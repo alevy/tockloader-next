@@ -108,6 +108,10 @@ console = "serial"
 port = "/dev/ttyUSB0"    # your desk, not about the board
 ```
 
+On the command line an option names its transport the way the table header
+does -- `--opt serial.port=/dev/ttyUSB0` is that same two lines written flat.
+Unqualified, it means whichever transport serves `default`.
+
 Then `tock list` reaches the flash and `tock console` reaches the console,
 neither naming a transport. `tock transports` lists what is installed and
 what each one reads; `tock config show` prints the routing and where every

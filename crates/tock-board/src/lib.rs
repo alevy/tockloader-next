@@ -14,8 +14,8 @@ pub use config::{
     DEFAULT_ROUTE, DeviceAlias, ProjectApp, ProjectFile, ProjectKernel, Transport, UserConfig,
 };
 pub use resolve::{
-    Board, Context, Inputs, Layer, Settings, Source, Sourced, TransportContext, env_option_key,
-    resolve,
+    Board, Context, Inputs, Layer, OptionOverride, Settings, Source, Sourced, TransportContext,
+    env_option_key, resolve,
 };
 pub use size::Size;
 
