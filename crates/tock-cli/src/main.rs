@@ -53,6 +53,7 @@ fn run(g: Global, command: Command) -> Result<(), CliError> {
             command: ConfigCommand::Show,
         } => config_show(&g),
         Command::Context => config::context(&g),
+        Command::Boards => config::boards(&g),
         Command::Transports => connection::transports(&g),
         Command::Broker => broker(&g),
         Command::External(args) => external(&g, args),
