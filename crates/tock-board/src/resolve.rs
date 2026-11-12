@@ -1,6 +1,12 @@
 //! Combine flags, environment, project file, user config and board file into
 //! one [`Settings`].
 //!
+//! The environment layer is **experimental**. It duplicates what flags and
+//! files already say, and is the only layer that cannot express everything
+//! they can: `TOCK_OPT_SERIAL_PORT` cannot be told from an option named
+//! `serial_port`, so it reaches the default transport and no other. Whether
+//! it earns its place is open -- see the README.
+//!
 //! Precedence, highest first, for each setting:
 //!
 //! 1. command-line flag

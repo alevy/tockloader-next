@@ -8,7 +8,10 @@ use tock_board::OptionOverride;
 const ARGS: &str = "args";
 
 const AFTER_HELP: &str = "Any command above that `tock` does not answer itself is a `tock-<name>`\n\
-    binary, found next to `tock` or on PATH. Install one and it appears here.";
+    binary, found next to `tock` or on PATH. Install one and it appears here.\n\
+    \n\
+    Every TOCK_* environment variable is experimental, as are --device and\n\
+    --opt's `transport.key=value` form. See the README.";
 
 #[derive(Parser)]
 #[command(
@@ -33,14 +36,10 @@ pub(crate) struct Global {
     /// Transport to reach the board with (e.g. file, openocd).
     #[arg(long, global = true)]
     pub(crate) transport: Option<String>,
-    /// Named device from the user config: `[devices.<name>]`.
+    /// Named device from the user config: `[devices.<name>]`. Experimental.
     #[arg(long, global = true)]
     pub(crate) device: Option<String>,
-    /// Transport option, `[transport.]key=value`. Repeatable.
-    ///
-    /// `--opt serial.port=/dev/ttyUSB0` is `[transports.serial] port =
-    /// "/dev/ttyUSB0"`, written on one line. Unqualified means the
-    /// transport serving `default`.
+    /// Transport option: `[transport.]key=value`, the TOML path written flat.
     #[arg(long = "opt", global = true, value_parser = parse_opt)]
     pub(crate) options: Vec<OptionOverride>,
     /// Output format.

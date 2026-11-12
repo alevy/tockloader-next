@@ -9,6 +9,12 @@
 //! - a **description of the board**, as JSON in `TOCK_CONTEXT` -- see
 //!   [`context`].
 //!
+//! Both are **experimental**, as is `TOCK_FORMAT`. They are what a
+//! third-party `tock-<name>` binds to, and they travel with a protocol at
+//! version 0: expect the names, the shapes and the handoff itself to move
+//! before any of it is promised. Linking this crate is how a Rust subcommand
+//! avoids caring.
+//!
 //! Both have a fallback for a subcommand nobody launched: `connect` will
 //! start `tock broker` itself, and `context` says plainly that it has no
 //! board rather than guessing one.
