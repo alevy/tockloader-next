@@ -73,9 +73,15 @@ const FIELD: char = '\u{1f}';
 ///
 /// The distinction is whether there is still an answer to give. An operation
 /// that failed has one, and the client may send more; a connection that failed
-/// has none, and nothing further can be sent. Kept here rather than shared:
-/// `file.rs` has no second kind, and a helper designed against one consumer is
-/// a guess.
+/// has none, and nothing further can be sent.
+///
+/// Kept here rather than shared, and now for a better reason than when that
+/// was first written: of the three transports this is the only one with a
+/// second kind. `file.rs` talks to an image on disk and `serial.rs` to a
+/// port, and a failure against either leaves the pipe to the caller intact.
+/// This one talks to openocd over a socket, which is both the device and the
+/// only way to reach it. The number of kinds is a fact about what a
+/// transport talks to, not a style to be made uniform.
 #[cfg_attr(test, derive(Debug))]
 enum Failure {
     /// Answer the client with this. The connection is fine.

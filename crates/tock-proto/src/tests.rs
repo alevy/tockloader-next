@@ -69,17 +69,78 @@ fn base_dir_exposes_the_directory_a_value_was_written_in() {
     assert_eq!(o.base_dir("chip"), None);
 }
 
+/// The distinction the whole trait rests on, from the serving side.
+///
+/// An operation that failed leaves the conversation open: the frame goes
+/// out and the next request is read. A connection that failed ends it: the
+/// frame goes out so the peer is not left waiting, and then nothing more is
+/// read, because by definition nothing more could be answered.
+///
+/// This is what two transports quietly disagreed about while a conversion in
+/// this crate decided it for them, so it is worth a test rather than a
+/// paragraph.
 #[test]
-fn io_errors_convert_into_device_responses() {
-    let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope");
-    let r: Response = e.into();
-    match r {
-        Response::Error { kind, message, .. } => {
-            assert_eq!(kind, ErrorKind::Device);
-            assert!(message.contains("nope"), "{message}");
+fn an_operation_that_failed_leaves_the_connection_open() {
+    /// Refuses the first request, answers the second.
+    struct Grudging(usize);
+    impl Connection for Grudging {
+        fn call(&mut self, _: Request, _: Vec<u8>) -> Result<(Response, Vec<u8>), ProtoError> {
+            self.0 += 1;
+            Ok(match self.0 {
+                1 => (Response::error(ErrorKind::Device, "not yet"), vec![]),
+                _ => (Response::Ok, vec![]),
+            })
         }
+    }
+
+    let mut asked = Vec::new();
+    for request in [Request::Reset, Request::Reset, Request::Close] {
+        write_frame(&mut asked, &request, &[]).unwrap();
+    }
+    let mut said = Vec::new();
+    serve(&mut asked.as_slice(), &mut said, &mut Grudging(0)).unwrap();
+
+    let answers = frames(&said);
+    assert_eq!(answers.len(), 3, "it kept answering after the refusal");
+    assert!(matches!(answers[0], Response::Error { .. }));
+    assert_eq!(answers[1], Response::Ok);
+}
+
+#[test]
+fn a_connection_that_failed_ends_it() {
+    /// Reports that there is nothing left to say.
+    struct Hungup;
+    impl Connection for Hungup {
+        fn call(&mut self, _: Request, _: Vec<u8>) -> Result<(Response, Vec<u8>), ProtoError> {
+            Err(ProtoError::failed("the wire went away"))
+        }
+    }
+
+    let mut asked = Vec::new();
+    for request in [Request::Reset, Request::Reset] {
+        write_frame(&mut asked, &request, &[]).unwrap();
+    }
+    let mut said = Vec::new();
+    serve(&mut asked.as_slice(), &mut said, &mut Hungup).unwrap();
+
+    let answers = frames(&said);
+    // One answer, not two: the peer is told rather than left waiting, and
+    // the second request is never looked at.
+    assert_eq!(answers.len(), 1);
+    match &answers[0] {
+        Response::Error { message, .. } => assert!(message.contains("went away"), "{message}"),
         other => panic!("{other:?}"),
     }
+}
+
+/// Every response in a stream of frames.
+fn frames(bytes: &[u8]) -> Vec<Response> {
+    let mut rest = bytes;
+    let mut out = Vec::new();
+    while let Some((response, _)) = read_frame::<_, Response>(&mut rest).unwrap() {
+        out.push(response);
+    }
+    out
 }
 
 #[test]

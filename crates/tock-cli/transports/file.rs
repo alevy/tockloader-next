@@ -96,10 +96,11 @@ impl FileTransport {
         let (file, flash) = self.require_open()?;
         check_range(flash, address, len)?;
         let mut out = vec![0xFF; len as usize];
-        file.seek(SeekFrom::Start(address - flash.start))?;
+        file.seek(SeekFrom::Start(address - flash.start))
+            .map_err(device)?;
         let mut filled = 0;
         while filled < out.len() {
-            match file.read(&mut out[filled..])? {
+            match file.read(&mut out[filled..]).map_err(device)? {
                 0 => break,
                 n => filled += n,
             }
@@ -110,8 +111,9 @@ impl FileTransport {
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Response> {
         let (file, flash) = self.require_open()?;
         check_range(flash, address, data.len() as u64)?;
-        file.seek(SeekFrom::Start(address - flash.start))?;
-        file.write_all(data)?;
+        file.seek(SeekFrom::Start(address - flash.start))
+            .map_err(device)?;
+        file.write_all(data).map_err(device)?;
         Ok(())
     }
 
@@ -121,6 +123,19 @@ impl FileTransport {
             None => Err(Response::error(ErrorKind::InvalidRequest, "not open")),
         }
     }
+}
+
+/// An image that will not answer is an operation that failed, not a failed
+/// connection.
+///
+/// The distinction is whether there is still an answer to give, and here
+/// there always is: this transport's link to its caller is a pipe managed by
+/// `serve`, and a bad seek on the image says nothing about it. The next
+/// request can be answered as well as this one could not. Compare the
+/// openocd transport, where an i/o failure is usually the socket driving
+/// openocd and so the end of the conversation.
+fn device(e: std::io::Error) -> Response {
+    Response::error(ErrorKind::Device, e.to_string())
 }
 
 /// Keep an access inside the image.
