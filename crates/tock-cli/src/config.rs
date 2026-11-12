@@ -226,8 +226,10 @@ pub(crate) struct Listed {
 pub(crate) fn boards(g: &Global) -> Result<(), CliError> {
     // The one in force, if there is one. A listing has to work when
     // resolution does not -- "no board selected" is the commonest reason to
-    // want it.
-    let chosen = load_settings(g).ok().map(|s| s.board_file.value);
+    // want it -- so a failure is carried and explained rather than returned.
+    let settled = load_settings(g);
+    let chosen = settled.as_ref().ok().map(|s| s.board_file.value.clone());
+    let unsettled = settled.err();
 
     let mut listed: Vec<Listed> = Vec::new();
     let mut add = |reference: &str, from: String, relative_to: Option<&str>| {
@@ -266,6 +268,15 @@ pub(crate) fn boards(g: &Global) -> Result<(), CliError> {
     for (name, _) in tock_board::BUNDLED {
         add(name, "bundled".into(), None);
     }
+    // A flag names a board as much as a file does, and leaving it out meant
+    // `--board ./mine.toml boards` listed everything except the one it was
+    // about, with nothing marked. Typed at a prompt, so relative to nothing.
+    if let Some(reference) = &g.board {
+        add(reference, "flag --board".into(), None);
+    }
+    if let Some(reference) = std::env::var("TOCK_BOARD").ok().filter(|v| !v.is_empty()) {
+        add(&reference, "env TOCK_BOARD".into(), None);
+    }
     if let Some((origin, project)) = load_project()? {
         if let Some(reference) = &project.board {
             add(reference, format!("project {origin}"), Some(&origin));
@@ -296,15 +307,30 @@ pub(crate) fn boards(g: &Global) -> Result<(), CliError> {
         let mark = if board.selected { '*' } else { ' ' };
         match &board.error {
             Some(why) => println!("{mark} {:<22} ({why})", board.reference),
-            None => println!(
-                "{mark} {:<22} {:<24} {}",
-                board.reference,
-                board.description.as_deref().unwrap_or(""),
-                board.from.join(", ")
-            ),
+            None => {
+                // The description, or failing that what the board calls
+                // itself -- `./lora.toml` says nothing, `lora-e5-mini` does.
+                // Not for a bundled board, where the name is the reference.
+                let what = board
+                    .description
+                    .as_deref()
+                    .or(board.name.as_deref().filter(|n| *n != board.reference))
+                    .unwrap_or("");
+                println!(
+                    "{mark} {:<22} {what:<24} {}",
+                    board.reference,
+                    board.from.join(", ")
+                )
+            }
         }
     }
     println!();
+    // Why nothing is marked, when nothing is. Resolution settles more than
+    // the board, so it can fail with the board perfectly well determined,
+    // and a blank column would be the only sign of it.
+    if let Some(why) = &unsettled {
+        println!("No board is in force here: {}", why.message);
+    }
     println!("A path to a board file also works, and is the only way to reach one");
     println!("that is neither bundled nor named above: --board ./my-board.toml");
     Ok(())
