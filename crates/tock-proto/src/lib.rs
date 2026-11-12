@@ -89,6 +89,22 @@ pub enum Request {
     Write {
         address: u64,
     },
+    /// Read whatever the device has said, waiting up to `timeout_ms` for
+    /// something to arrive. An empty payload means it stayed quiet, which is
+    /// an answer and not a failure. Payload in the response.
+    ///
+    /// Polled rather than pushed because the carrier is strictly
+    /// synchronous: one response per request, so a responder can never speak
+    /// unprompted. Blocking in the responder for a short while is what keeps
+    /// that from becoming a busy loop -- the waiting happens where the file
+    /// descriptor is, and the caller is free in between to send what the
+    /// user has typed.
+    ConsoleRead {
+        max: u64,
+        timeout_ms: u64,
+    },
+    /// Payload: bytes to send to the device, as if typed at it.
+    ConsoleWrite,
     Reset,
     Vendor {
         name: String,
@@ -224,6 +240,11 @@ pub enum Capability {
     /// is the transport's job to preserve the rest.
     MemoryWrite,
     Reset,
+    /// `console_read` and `console_write`: a byte stream to and from the
+    /// running device. Not every transport that can reach a board's flash
+    /// can reach its console, and the reverse holds too -- a USB-to-UART
+    /// bridge is a console and nothing else.
+    Console,
     /// Namespaced vendor operations, passed through untouched.
     Vendor(String),
 }
