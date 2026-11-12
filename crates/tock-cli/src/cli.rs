@@ -2,6 +2,7 @@
 //! arguments each one takes. Nothing here does any work.
 
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use tock_board::OptionOverride;
 
 /// Where a registered subcommand's untouched arguments are collected.
 const ARGS: &str = "args";
@@ -35,9 +36,13 @@ pub(crate) struct Global {
     /// Named device from the user config: `[devices.<name>]`.
     #[arg(long, global = true)]
     pub(crate) device: Option<String>,
-    /// Transport option, `key=value`. Repeatable.
-    #[arg(long = "opt", global = true, value_parser = parse_kv)]
-    pub(crate) options: Vec<(String, String)>,
+    /// Transport option, `[transport.]key=value`. Repeatable.
+    ///
+    /// `--opt serial.port=/dev/ttyUSB0` is `[transports.serial] port =
+    /// "/dev/ttyUSB0"`, written on one line. Unqualified means the
+    /// transport serving `default`.
+    #[arg(long = "opt", global = true, value_parser = parse_opt)]
+    pub(crate) options: Vec<OptionOverride>,
     /// Output format.
     #[arg(long, global = true, value_enum, default_value_t = Format::Human)]
     pub(crate) format: Format,
@@ -80,10 +85,31 @@ pub(crate) enum ConfigCommand {
     Show,
 }
 
-pub(crate) fn parse_kv(s: &str) -> Result<(String, String), String> {
-    s.split_once('=')
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .ok_or_else(|| format!("expected key=value, got `{s}`"))
+/// `--opt [transport.]key=value`, which is the TOML path written flat.
+///
+/// The qualifier is the table header: `serial.port=X` says exactly what
+/// `[transports.serial] port = X` says. Without one, it is the transport
+/// serving `default` -- the obvious one, for the common case where there is
+/// only ever one in play.
+///
+/// Only the first dot splits, so an option key may contain dots even though
+/// none does today.
+pub(crate) fn parse_opt(s: &str) -> Result<OptionOverride, String> {
+    let (name, value) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected [transport.]key=value, got `{s}`"))?;
+    let (transport, key) = match name.split_once('.') {
+        Some((transport, key)) => (Some(transport.to_string()), key),
+        None => (None, name),
+    };
+    if key.is_empty() {
+        return Err(format!("`{s}` has no option name"));
+    }
+    Ok(OptionOverride {
+        transport,
+        key: key.to_string(),
+        value: value.to_string(),
+    })
 }
 
 /// The parser, plus one subcommand per `tock-*` binary on this machine.

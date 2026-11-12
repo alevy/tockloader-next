@@ -695,7 +695,6 @@ impl OpenocdTransport {
             Request::Hello { .. } => Ok((
                 Response::Hello {
                     protocol: tock_proto::PROTOCOL_VERSION,
-                    transport: "openocd".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
                     capabilities: vec![
                         Capability::MemoryRead,

@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use tock_client::{CliError, connect, context, finish};
 use tock_image::Change;
+use tock_proto::Capability;
 
 #[path = "apps.rs"]
 mod apps;
@@ -38,7 +39,10 @@ fn run(args: &Args) -> Result<(), CliError> {
         include_sticky: args.include_sticky,
         ..Default::default()
     };
-    let mut device = connect()?;
+    // Even a dry run reads; only a real one writes, but saying so here
+    // would route differently for `--dry-run`, and a command that needs a
+    // different transport depending on a flag is a worse surprise.
+    let mut device = connect(&[Capability::MemoryRead, Capability::MemoryWrite])?;
     let mut survey = apps::survey(&mut device, &ctx)?;
     apps::apply(&mut device, &mut survey, &change, args.dry_run)?.report(args.dry_run);
     Ok(())

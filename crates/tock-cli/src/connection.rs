@@ -13,16 +13,19 @@ use tock_client::{CliError, Code, Spawned, proto};
 /// Open the transport named in the context. Every transport is an executable
 /// `tock-transport-<name>`, found next to `tock` or on `PATH` -- including the
 /// `file` transport, which ships alongside `tock` but is not special.
-pub fn open_connection(settings: &Settings, trace: bool) -> Result<Box<dyn Connection>, CliError> {
-    let name = &settings.transport.name.value;
+pub fn open_connection(
+    settings: &Settings,
+    name: &str,
+    trace: bool,
+) -> Result<Box<dyn Connection>, CliError> {
+    let _ = settings;
     let exe = format!("tock-transport-{name}");
     let path = crate::external::find_executable(&exe).ok_or_else(|| {
         CliError::new(
             Code::Config,
             format!(
-                "transport `{name}` (from {}) needs `{exe}`, which was not found \
-                 next to `tock` or on PATH",
-                settings.transport.name.source
+                "transport `{name}` needs `{exe}`, which was not found next to \
+                 `tock` or on PATH"
             ),
         )
         .hint(format!("install it, e.g. `cargo install {exe}`"))
@@ -56,19 +59,21 @@ pub fn open_connection(settings: &Settings, trace: bool) -> Result<Box<dyn Conne
 /// The result is an ordinary [`Client`] -- the same thing a subcommand gets
 /// from the connection it inherits. The difference is only that we started
 /// the transport and it did not.
-pub fn open(settings: &Settings, trace: bool) -> Result<Client, CliError> {
-    let connection = open_connection(settings, trace)?;
+pub fn open(settings: &Settings, name: &str, trace: bool) -> Result<Client, CliError> {
+    let connection = open_connection(settings, name, trace)?;
     let layout = &settings.board.layout;
     let flash = FlashInfo {
         start: layout.flash.start.0,
         size: layout.flash.size.0,
     };
-    let mut device =
-        Client::open(connection, concat!("tock ", env!("CARGO_PKG_VERSION"))).map_err(proto)?;
+    // Nothing is asked for here: this end is opening a transport it chose,
+    // and what it can do is what the routing already claimed it must.
+    let mut device = Client::open(connection, concat!("tock ", env!("CARGO_PKG_VERSION")), &[])
+        .map_err(proto)?;
     // Before `Open`, so a typo costs a greeting and not a halted target.
-    refuse_undeclared(&device, settings)?;
+    refuse_undeclared(&device, settings, name)?;
 
-    let options = serde_json::to_value(settings.transport_options()).unwrap();
+    let options = serde_json::to_value(settings.transport_options(name)).unwrap();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // The raw connection, not `Client::call`: a refusal carries the option
     // keys it is about, and collapsing it to a `ProtoError` would drop them
@@ -81,7 +86,7 @@ pub fn open(settings: &Settings, trace: bool) -> Result<Client, CliError> {
                 arch: settings.board.info.arch.clone(),
                 flash,
                 options: options.as_object().cloned().unwrap_or_default(),
-                option_bases: settings.option_bases(&cwd),
+                option_bases: settings.option_bases(name, &cwd),
             },
             vec![],
         )
@@ -93,7 +98,9 @@ pub fn open(settings: &Settings, trace: bool) -> Result<Client, CliError> {
             suggestion,
             details,
             keys,
-        } => Err(refused(settings, kind, message, suggestion, details, keys)),
+        } => Err(refused(
+            settings, name, kind, message, suggestion, details, keys,
+        )),
         _ => Ok(device),
     }
 }
@@ -104,18 +111,17 @@ pub fn open(settings: &Settings, trace: bool) -> Result<Client, CliError> {
 /// the transport sees a map and cannot tell a key it ignores from a key that
 /// was never meant for it. A silently ignored typo is the one failure all the
 /// provenance in the world cannot help with.
-fn refuse_undeclared(device: &Client, settings: &Settings) -> Result<(), CliError> {
-    let given: Vec<&str> = settings
-        .transport
-        .options
-        .keys()
-        .map(String::as_str)
+fn refuse_undeclared(device: &Client, settings: &Settings, name: &str) -> Result<(), CliError> {
+    let resolved = settings.transport.options.get(name);
+    let given: Vec<&str> = resolved
+        .into_iter()
+        .flatten()
+        .map(|(key, _)| key.as_str())
         .collect();
     let unknown = device.undeclared(given);
     let Some(first) = unknown.first() else {
         return Ok(());
     };
-    let name = &settings.transport.name.value;
     let mut error = CliError::new(
         Code::Config,
         format!(
@@ -126,7 +132,7 @@ fn refuse_undeclared(device: &Client, settings: &Settings) -> Result<(), CliErro
             }
         ),
     );
-    if let Some(source) = settings.transport.options.get(first) {
+    if let Some(source) = resolved.and_then(|options| options.get(first)) {
         error = error.detail(format!("`{first}` came from {}", source.source));
     }
     if let Some(near) = nearest(first, device) {
@@ -178,19 +184,24 @@ fn distance(a: &str, b: &str) -> usize {
 /// of five layers wrote it. Neither sentence is much use without the other.
 fn refused(
     settings: &Settings,
+    name: &str,
     kind: tock_proto::ErrorKind,
     message: String,
     suggestion: Option<String>,
     details: Vec<String>,
     keys: Vec<String>,
 ) -> CliError {
-    let name = &settings.transport.name.value;
     let mut error = CliError::new(tock_client::code_for(kind), format!("{name}: {message}"));
     for detail in details {
         error = error.detail(detail);
     }
     for key in &keys {
-        if let Some(sourced) = settings.transport.options.get(key) {
+        if let Some(sourced) = settings
+            .transport
+            .options
+            .get(name)
+            .and_then(|o| o.get(key))
+        {
             error = error.detail(format!(
                 "{key} = {}, from {}",
                 sourced.value, sourced.source
@@ -276,7 +287,7 @@ fn greet(name: &str) -> Greeting {
     let reader = child.stdout.take().expect("piped");
     let writer = child.stdin.take().expect("piped");
     let connection = Box::new(Spawned::new(reader, writer, child));
-    match Client::open(connection, concat!("tock ", env!("CARGO_PKG_VERSION"))) {
+    match Client::open(connection, concat!("tock ", env!("CARGO_PKG_VERSION")), &[]) {
         Ok(client) => {
             greeting.version.clone_from(&client.version);
             greeting.capabilities.clone_from(&client.capabilities);

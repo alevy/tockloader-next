@@ -23,7 +23,9 @@ use std::process::{Command, Stdio};
 
 use tock_board::Context;
 
-use tock_proto::{Client, Connection, ErrorKind, ProtoError, Request, Response, StreamChannel};
+use tock_proto::{
+    Capability, Client, Connection, ErrorKind, ProtoError, Request, Response, StreamChannel,
+};
 
 pub use error::{CliError, Code};
 
@@ -33,8 +35,14 @@ pub use error::{CliError, Code};
 /// case and means `tock` owns the device. Without it -- running a subcommand
 /// by hand, say -- this starts `tock broker`, which resolves the environment
 /// and opens a transport the same way.
-pub fn connect() -> Result<Client, CliError> {
-    Client::open(raw_connection()?, &whoami()).map_err(proto)
+///
+/// `needs` is what this command intends to do. Say it here rather than
+/// discovering it a refusal at a time: a board may be reachable several ways
+/// at once, and the far end cannot route what it has not been told. It is
+/// also the earliest point at which "nothing here can do that" can be said,
+/// which is before any of the work.
+pub fn connect(needs: &[Capability]) -> Result<Client, CliError> {
+    Client::open(raw_connection()?, &whoami(), needs).map_err(proto)
 }
 
 /// How we introduce ourselves in `Hello`: the program running, since that is

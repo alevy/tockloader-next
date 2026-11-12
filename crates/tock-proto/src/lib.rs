@@ -66,6 +66,16 @@ pub enum Request {
     Hello {
         protocol: u32,
         client: String,
+        /// What the caller intends to do, so a responder that routes can
+        /// decide where to send it before anything is opened.
+        ///
+        /// A caller declares this once rather than discovering it a refusal
+        /// at a time: `tock broker` may have several transports available --
+        /// flash over a probe, the console over a bridge soldered beside it
+        /// -- and nothing but the caller knows which of them this command
+        /// will need. Empty asks for nothing in particular.
+        #[serde(default)]
+        needs: Vec<Capability>,
     },
     /// Connect to the device. `options` are the resolved transport options.
     Open {
@@ -118,7 +128,6 @@ pub enum Request {
 pub enum Response {
     Hello {
         protocol: u32,
-        transport: String,
         version: String,
         capabilities: Vec<Capability>,
         /// Every option this transport reads. See [`OptionSpec`].
@@ -547,7 +556,6 @@ pub struct Client {
     /// For a relay, which wants [`Connection::call`] and its two kinds of
     /// failure kept apart. Everything else should use [`Client::call`].
     pub connection: Box<dyn Connection>,
-    pub transport: String,
     /// The far end's own version, as it reported it.
     pub version: String,
     pub capabilities: Vec<Capability>,
@@ -560,16 +568,20 @@ impl Client {
     ///
     /// `client` is who is talking, for the far end's logs -- the program,
     /// not this crate, which is why it is asked for rather than assumed.
-    pub fn open(mut connection: Box<dyn Connection>, client: &str) -> Result<Client, ProtoError> {
+    pub fn open(
+        mut connection: Box<dyn Connection>,
+        client: &str,
+        needs: &[Capability],
+    ) -> Result<Client, ProtoError> {
         let hello = Request::Hello {
             protocol: PROTOCOL_VERSION,
             client: client.to_string(),
+            needs: needs.to_vec(),
         };
         match collapse(connection.call(hello, vec![]))? {
             (
                 Response::Hello {
                     protocol,
-                    transport,
                     version,
                     capabilities,
                     options,
@@ -578,13 +590,13 @@ impl Client {
             ) => {
                 if protocol != PROTOCOL_VERSION {
                     return Err(ProtoError::failed(format!(
-                        "`{transport}` speaks protocol {protocol}, this tool speaks {PROTOCOL_VERSION}"
+                        "the far end speaks protocol {protocol}, this tool speaks \
+                         {PROTOCOL_VERSION}"
                     ))
                     .with_kind(ErrorKind::Device));
                 }
                 Ok(Client {
                     connection,
-                    transport,
                     version,
                     capabilities,
                     options,
@@ -615,11 +627,10 @@ impl Client {
         }
         let name = capability.name();
         Err(ProtoError::failed(format!(
-            "`{doing}` needs the `{name}` capability, which transport `{}` does not have",
-            self.transport
+            "`{doing}` needs the `{name}` capability, which this connection does not provide"
         ))
         .with_kind(ErrorKind::Unsupported)
-        .with_suggestion("pick a transport that has it with --transport <name>"))
+        .with_suggestion("tock transports -- to see what each one can do"))
     }
 
     /// Read byte ranges, one request each, and insist on being answered in
@@ -638,8 +649,7 @@ impl Client {
             let (_, data) = self.call(Request::Read { address, len }, vec![])?;
             if data.len() as u64 != len {
                 return Err(ProtoError::failed(format!(
-                    "transport `{}` returned {} of the {len} bytes asked for at {address:#x}",
-                    self.transport,
+                    "{} of the {len} bytes asked for at {address:#x} came back",
                     data.len()
                 ))
                 .with_kind(ErrorKind::Device));

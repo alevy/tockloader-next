@@ -110,10 +110,20 @@ pub(crate) fn load_settings(g: &Global) -> Result<Settings, CliError> {
             // `vars_os`, not `vars`: the latter panics on any variable in the
             // environment that is not valid Unicode, including ones that have
             // nothing to do with us.
+            // No qualifier here: `TOCK_OPT_SERIAL_PORT` cannot be told from
+            // an option named `serial_port`, and `page_size` shows that keys
+            // do contain underscores. The environment therefore reaches the
+            // default route only; a file can say anything.
             options: std::env::vars_os()
                 .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
                 .filter(|(_, v)| !v.is_empty())
-                .filter_map(|(k, v)| Some((tock_board::env_option_key(&k)?, v)))
+                .filter_map(|(k, v)| {
+                    Some(tock_board::OptionOverride {
+                        transport: None,
+                        key: tock_board::env_option_key(&k)?,
+                        value: v,
+                    })
+                })
                 .collect(),
         },
         project: project.as_ref().map(|(o, p)| (o.clone(), p)),
@@ -149,10 +159,19 @@ pub(crate) fn config_show(g: &Global) -> Result<(), CliError> {
     println!("flash      {:#x} +{:#x}", l.flash.start.0, l.flash.size.0);
     println!("apps       {:#x} +{:#x}", l.apps.start.0, l.apps.size.0);
     println!("placement  {:?}", l.placement);
-    println!("transport  {}", settings.transport.name.value);
-    println!("           from {}", settings.transport.name.source);
-    for (k, v) in &settings.transport.options {
-        println!("  {k} = {}    ({})", v.value, v.source);
+    // The routing table, which is the answer to "why did it use that one".
+    for (capability, routed) in &settings.transport.routes {
+        println!("transport  {capability} -> {}", routed.value);
+        println!("           from {}", routed.source);
+    }
+    for (name, options) in &settings.transport.options {
+        if options.is_empty() {
+            continue;
+        }
+        println!("  [{name}]");
+        for (k, v) in options {
+            println!("    {k} = {}    ({})", v.value, v.source);
+        }
     }
     match &settings.device {
         Some(d) => println!("device     {}  (from {})", d.value, d.source),

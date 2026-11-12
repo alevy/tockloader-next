@@ -2,6 +2,28 @@
 
 use super::*;
 
+/// The options of whichever transport the default route names. Every test
+/// here resolves a single transport, so this is unambiguous -- and keeping
+/// it in one place means the routing change did not scatter lookups through
+/// twenty assertions.
+/// An override with no transport named, which means the default route.
+fn unqualified(key: &str, value: &str) -> OptionOverride {
+    OptionOverride {
+        transport: None,
+        key: key.into(),
+        value: value.into(),
+    }
+}
+
+fn options(ctx: &Settings) -> &BTreeMap<String, Sourced<toml::Value>> {
+    let name = &ctx
+        .transport
+        .route("default")
+        .expect("a default route")
+        .value;
+    ctx.transport.options.get(name).expect("its options")
+}
+
 struct Files(Vec<(&'static str, &'static str)>);
 impl FileSource for Files {
     fn read(&self, reference: &str, _rel: Option<&str>) -> Result<(String, String), Error> {
@@ -39,13 +61,16 @@ fn board_default_transport_and_options() {
     .unwrap();
     assert_eq!(ctx.board.info.name, "nrf52840dk");
     assert_eq!(ctx.board_file.source, Source::Project("Tock.toml".into()));
-    assert_eq!(ctx.transport.name.value, "openocd");
-    assert!(matches!(ctx.transport.name.source, Source::Board(_)));
+    assert_eq!(ctx.transport.route("default").unwrap().value, "openocd");
+    assert!(matches!(
+        ctx.transport.route("default").unwrap().source,
+        Source::Board(_)
+    ));
     // Both halves come from the board file: the chip, which is the same for
     // everyone, and a probe default, which is only right until someone
     // plugs in a different one.
     for key in ["target", "probe", "page_size"] {
-        let option = ctx.transport.options.get(key).expect(key);
+        let option = options(&ctx).get(key).expect(key);
         assert!(matches!(option.source, Source::Board(_)), "{key}");
     }
 }
@@ -80,23 +105,23 @@ fn precedence_flag_over_alias_over_project_over_user() {
     )
     .unwrap();
     // The alias beats the project file.
-    assert_eq!(ctx.transport.name.value, "jlink");
-    assert_eq!(ctx.transport.name.source, Source::Device("lab".into()));
+    assert_eq!(ctx.transport.route("default").unwrap().value, "jlink");
+    assert_eq!(
+        ctx.transport.route("default").unwrap().source,
+        Source::Device("lab".into())
+    );
     // Board < user < alias for options. `chip` is supplied only by the board
     // file, so its source proves the board layer reached the resolved set.
     assert_eq!(
-        ctx.transport.options["chip"].source,
+        options(&ctx)["chip"].source,
         Source::Board("bundled:nrf52840dk".into())
     );
-    assert_eq!(
-        ctx.transport.options["speed"].value.as_integer(),
-        Some(4000)
-    );
-    assert_eq!(ctx.transport.options["serial"].value.as_str(), Some("123"));
+    assert_eq!(options(&ctx)["speed"].value.as_integer(), Some(4000));
+    assert_eq!(options(&ctx)["serial"].value.as_str(), Some("123"));
 
     let flags = Layer {
         transport: Some("openocd".into()),
-        options: vec![("speed".into(), "100".into())],
+        options: vec![unqualified("speed", "100")],
         ..Default::default()
     };
     let ctx = resolve(
@@ -108,9 +133,9 @@ fn precedence_flag_over_alias_over_project_over_user() {
         &Files(vec![]),
     )
     .unwrap();
-    assert_eq!(ctx.transport.name.value, "openocd");
+    assert_eq!(ctx.transport.route("default").unwrap().value, "openocd");
     assert_eq!(
-        ctx.transport.options["speed"].source,
+        options(&ctx)["speed"].source,
         Source::Flag("--opt speed".into())
     );
 }
@@ -136,15 +161,12 @@ fn project_transport_options_beat_the_board_file() {
     )
     .unwrap();
     assert_eq!(
-        ctx.transport.options["config"].source,
+        options(&ctx)["config"].source,
         Source::Project("Tock.toml".into())
     );
-    assert_eq!(
-        ctx.transport.options["speed"].value.as_integer(),
-        Some(9000)
-    );
+    assert_eq!(options(&ctx)["speed"].value.as_integer(), Some(9000));
     // A table for a transport that was not selected contributes nothing.
-    assert!(!ctx.transport.options.contains_key("chip"));
+    assert!(!options(&ctx).contains_key("chip"));
 }
 
 #[test]
@@ -169,15 +191,9 @@ fn alias_options_beat_project_options() {
         &Files(vec![]),
     )
     .unwrap();
-    assert_eq!(
-        ctx.transport.options["serial"].value.as_str(),
-        Some("from-alias")
-    );
+    assert_eq!(options(&ctx)["serial"].value.as_str(), Some("from-alias"));
     // ...and project still beats user config.
-    assert_eq!(
-        ctx.transport.options["speed"].value.as_integer(),
-        Some(9000)
-    );
+    assert_eq!(options(&ctx)["speed"].value.as_integer(), Some(9000));
 }
 
 #[test]
@@ -189,33 +205,27 @@ fn env_options_beat_project_and_lose_to_flags() {
     )
     .unwrap();
     let env_layer = || Layer {
-        options: vec![("path".into(), "from-env".into())],
+        options: vec![unqualified("path", "from-env")],
         ..Default::default()
     };
 
     let mut i = inputs(Layer::default(), Some(("Tock.toml".into(), &project)), None);
     i.env = env_layer();
     let ctx = resolve(&i, &Files(vec![])).unwrap();
+    assert_eq!(options(&ctx)["path"].value.as_str(), Some("from-env"));
     assert_eq!(
-        ctx.transport.options["path"].value.as_str(),
-        Some("from-env")
-    );
-    assert_eq!(
-        ctx.transport.options["path"].source,
+        options(&ctx)["path"].source,
         Source::Env("TOCK_OPT_PATH".into())
     );
 
     let flags = Layer {
-        options: vec![("path".into(), "from-flag".into())],
+        options: vec![unqualified("path", "from-flag")],
         ..Default::default()
     };
     let mut i = inputs(flags, Some(("Tock.toml".into(), &project)), None);
     i.env = env_layer();
     let ctx = resolve(&i, &Files(vec![])).unwrap();
-    assert_eq!(
-        ctx.transport.options["path"].value.as_str(),
-        Some("from-flag")
-    );
+    assert_eq!(options(&ctx)["path"].value.as_str(), Some("from-flag"));
 }
 
 #[test]
@@ -325,8 +335,8 @@ fn board_files_use_snake_case_keys_and_values() {
     let ctx = resolve(&inputs(flags, None, None), &files).unwrap();
     assert!(ctx.board.layout.app_ram.is_some());
     // Transport names stay as they are: `probe-rs` names an executable.
-    assert_eq!(ctx.transport.name.value, "probe-rs");
-    assert_eq!(ctx.transport.options["chip"].value.as_str(), Some("X"));
+    assert_eq!(ctx.transport.route("default").unwrap().value, "probe-rs");
+    assert_eq!(options(&ctx)["chip"].value.as_str(), Some("X"));
 }
 
 #[test]
@@ -372,4 +382,94 @@ fn layout_is_validated() {
     "#;
     let err = BoardFile::parse("x.toml", bad).unwrap_err().to_string();
     assert!(err.contains("overlaps layout.kernel"), "{err}");
+}
+
+/// `--opt serial.port=X` is `[transports.serial] port = X` written flat.
+/// The qualifier is the table header, so it reaches a transport whether or
+/// not that transport is the default one.
+#[test]
+fn a_qualified_option_reaches_only_the_transport_it_names() {
+    let qualified = |transport: &str, key: &str, value: &str| OptionOverride {
+        transport: Some(transport.into()),
+        key: key.into(),
+        value: value.into(),
+    };
+    let project = ProjectFile {
+        board: Some("nrf52840dk".into()),
+        transport: Some(Transport::Routed(BTreeMap::from([
+            ("default".to_string(), "openocd".to_string()),
+            ("console".to_string(), "serial".to_string()),
+        ]))),
+        ..Default::default()
+    };
+    let flags = Layer {
+        options: vec![
+            qualified("serial", "port", "/dev/ttyUSB0"),
+            // Unqualified: the default route's, which is openocd here.
+            unqualified("page_size", "8192"),
+        ],
+        ..Default::default()
+    };
+    let ctx = resolve(
+        &inputs(flags, Some(("Tock.toml".into(), &project)), None),
+        &Files(vec![]),
+    )
+    .unwrap();
+
+    let openocd = &ctx.transport.options["openocd"];
+    let serial = &ctx.transport.options["serial"];
+    assert_eq!(openocd["page_size"].value.as_integer(), Some(8192));
+    assert!(
+        !openocd.contains_key("port"),
+        "a qualified option must not leak to another transport"
+    );
+    assert_eq!(serial["port"].value.as_str(), Some("/dev/ttyUSB0"));
+    assert!(
+        !serial.contains_key("page_size"),
+        "an unqualified option is the default route's alone"
+    );
+    // And it says so, so `config show` can explain where it came from.
+    assert_eq!(
+        serial["port"].source,
+        Source::Flag("--opt serial.port".into())
+    );
+}
+
+/// Without a default route there is no "the obvious one" to mean, and
+/// quietly dropping the value is the failure the option schema exists to
+/// prevent. The error says what to write instead.
+#[test]
+fn an_unqualified_option_needs_a_default_route() {
+    // A board reachable only one way, and not the default way: routes merge,
+    // so the board file must be the one that declines to name a default.
+    let files = Files(vec![(
+        "boards/console-only.toml",
+        r#"
+        [board]
+        name = "console-only"
+        arch = "cortex-m4"
+        [board.transport]
+        console = "serial"
+        [layout]
+        flash = { start = 0x0, size = "1M" }
+        kernel = { start = 0x0, size = "256K" }
+        apps = { start = 0x40000, size = "768K" }
+        "#,
+    )]);
+    let project = ProjectFile {
+        board: Some("boards/console-only.toml".into()),
+        ..Default::default()
+    };
+    let flags = Layer {
+        options: vec![unqualified("port", "/dev/ttyUSB0")],
+        ..Default::default()
+    };
+    let err = resolve(
+        &inputs(flags, Some(("Tock.toml".into(), &project)), None),
+        &files,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("does not say which transport"), "{err}");
+    assert!(err.contains("<transport>.port"), "{err}");
 }

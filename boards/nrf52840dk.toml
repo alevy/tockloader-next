@@ -8,9 +8,13 @@
 name = "nrf52840dk"
 description = "Nordic nRF52840 DK"
 arch = "cortex-m4"
-# How this board is normally reached; override with --transport, or in
-# Tock.toml or your user config.
-transport = "openocd"
+# How this board is reached, per capability. `default` covers everything not
+# named. Override any single route in your Tock.toml or user config -- if
+# your console comes over RTT rather than the bridge, that is
+# `[transport] console = "openocd"` and nothing else changes.
+[board.transport]
+default = "openocd"
+console = "serial"
 
 [layout]
 flash = { start = 0x0000_0000, size = "1M" }
