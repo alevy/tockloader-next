@@ -35,6 +35,34 @@ impl FileSource for Files {
     }
 }
 
+/// A [`FileSource`] that remembers what it was asked for, and what it was
+/// told to resolve it against.
+///
+/// [`Files`] discards that second argument, which is why no test using it
+/// could have noticed a wrong one -- and one was wrong for months.
+#[derive(Default)]
+struct Asked(std::cell::RefCell<Vec<(String, Option<String>)>>);
+
+/// Enough of a board file to resolve.
+const A_BOARD: &str = r#"
+    [board]
+    name = "mine"
+    arch = "cortex-m4"
+    [layout]
+    flash = { start = 0x0, size = "1M" }
+    kernel = { start = 0x0, size = "256K" }
+    apps = { start = 0x40000, size = "768K" }
+"#;
+
+impl FileSource for Asked {
+    fn read(&self, reference: &str, rel: Option<&str>) -> Result<(String, String), Error> {
+        self.0
+            .borrow_mut()
+            .push((reference.to_string(), rel.map(str::to_string)));
+        Ok((reference.to_string(), A_BOARD.to_string()))
+    }
+}
+
 fn inputs<'a>(
     flags: Layer,
     project: Option<(String, &'a ProjectFile)>,
@@ -472,4 +500,76 @@ fn an_unqualified_option_needs_a_default_route() {
     .to_string();
     assert!(err.contains("does not say which transport"), "{err}");
     assert!(err.contains("<transport>.port"), "{err}");
+}
+
+/// A relative path in an alias belongs to the file the alias is written in,
+/// which is the user config -- the alias itself records only its own name.
+///
+/// This resolved against the working directory instead, so
+/// `[devices.lab] board = "./mine.toml"` worked from the directory holding
+/// the user config and nowhere else. The rule was stated correctly twenty
+/// lines away, for transport options, and not here.
+#[test]
+fn a_board_path_in_an_alias_is_relative_to_the_user_config() {
+    const CONFIG: &str = "/home/me/.config/tock/config.toml";
+    let user = UserConfig::parse(
+        CONFIG,
+        r#"
+        [devices.lab]
+        board = "./mine.toml"
+        transport = "file"
+        "#,
+    )
+    .unwrap();
+    let flags = Layer {
+        device: Some("lab".into()),
+        ..Default::default()
+    };
+    let asked = Asked::default();
+    resolve(&inputs(flags, None, Some((CONFIG.into(), &user))), &asked).unwrap();
+
+    let asked = asked.0.borrow();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].0, "./mine.toml");
+    assert_eq!(asked[0].1.as_deref(), Some(CONFIG));
+}
+
+/// The same path given as a flag is typed at a prompt, not written in a
+/// file, so it belongs to the working directory and has no base at all.
+#[test]
+fn a_board_path_on_the_command_line_has_no_file_to_be_relative_to() {
+    let flags = Layer {
+        board: Some("./mine.toml".into()),
+        transport: Some("file".into()),
+        ..Default::default()
+    };
+    let asked = Asked::default();
+    resolve(&inputs(flags, None, None), &asked).unwrap();
+
+    let asked = asked.0.borrow();
+    assert_eq!(asked[0].0, "./mine.toml");
+    assert_eq!(asked[0].1, None);
+}
+
+/// And one written in a project file belongs to that file.
+#[test]
+fn a_board_path_in_a_project_file_is_relative_to_it() {
+    let project = ProjectFile {
+        board: Some("boards/mine.toml".into()),
+        transport: Some("file".into()),
+        ..Default::default()
+    };
+    let asked = Asked::default();
+    resolve(
+        &inputs(
+            Layer::default(),
+            Some(("/repo/Tock.toml".into(), &project)),
+            None,
+        ),
+        &asked,
+    )
+    .unwrap();
+
+    let asked = asked.0.borrow();
+    assert_eq!(asked[0].1.as_deref(), Some("/repo/Tock.toml"));
 }
