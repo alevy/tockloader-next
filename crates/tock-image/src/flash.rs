@@ -1,11 +1,20 @@
 use std::collections::BTreeMap;
 
-use crate::Region;
-
 /// What is known about the contents of flash. Ranges that have not been read
 /// are unknown, not erased. Nothing here models erase geometry: that belongs
 /// to whichever transport is on the other end.
-#[derive(Clone, Debug)]
+///
+/// Deliberately unbounded. This took a [`Region`] once and ignored it, and
+/// the obvious repair -- refuse anything outside -- would have been the
+/// wrong one twice over. It is a record of bytes somebody read, not a say in
+/// which bytes they may; the address a caller is allowed to touch is the
+/// transport's to rule on, since a transport is an executable and anything
+/// in front of it can be gone around. A second opinion here would be the
+/// `Bounded` decorator again: a shared guard that made a transport missing
+/// its own check look correct.
+///
+/// [`Region`]: crate::Region
+#[derive(Clone, Debug, Default)]
 pub struct Flash {
     /// Non-overlapping, non-abutting known runs, keyed by start address.
     runs: BTreeMap<u64, Vec<u8>>,
@@ -21,10 +30,9 @@ pub struct NeedRead {
 }
 
 impl Flash {
-    pub fn new(_region: &Region) -> Flash {
-        Flash {
-            runs: BTreeMap::new(),
-        }
+    /// Nothing known yet.
+    pub fn new() -> Flash {
+        Flash::default()
     }
 
     /// Record known bytes, merging with anything they touch or abut.

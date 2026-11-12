@@ -273,11 +273,7 @@ fn no_room_for_a_table_means_no_window() {
 
 #[test]
 fn attributes_asks_for_the_window_then_reads_it() {
-    let apps = Region {
-        start: 0x40000,
-        size: 0x1000,
-    };
-    let mut flash = Flash::new(&apps);
+    let mut flash = Flash::new();
 
     // Nothing known yet: it must ask, and for the whole window at once.
     let need = attributes(0x40000, 0x0, &flash).expect_err("must ask");
@@ -296,11 +292,7 @@ fn attributes_asks_for_the_window_then_reads_it() {
 
 #[test]
 fn a_board_with_no_kernel_reads_as_no_attributes() {
-    let apps = Region {
-        start: 0x40000,
-        size: 0x1000,
-    };
-    let mut flash = Flash::new(&apps);
+    let mut flash = Flash::new();
     flash.insert(0x40000 - MAX_TABLE, &vec![0xFF; MAX_TABLE as usize]);
     assert_eq!(attributes(0x40000, 0x0, &flash), Ok(None));
 }

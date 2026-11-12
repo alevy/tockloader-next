@@ -111,10 +111,7 @@ pub fn survey(device: &mut Client, ctx: &Context) -> Result<Survey, CliError> {
         start: ctx.apps.start,
         size: 0,
     });
-    let mut flash = Flash::new(&Region {
-        start: span.start,
-        size: span.size + ctx.apps.size,
-    });
+    let mut flash = Flash::new();
     for (address, data) in device
         .read_ranges(&[(span.start, span.size + tock_image::HEADER_PROBE)])
         .map_err(proto)?
