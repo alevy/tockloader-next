@@ -209,11 +209,11 @@ pub fn discover(region: &Region, flash: &Flash) -> Result<Discovered, NeedRead> 
 /// so here rather than through an API shaped for someone who does not.
 #[doc(hidden)]
 pub mod testing {
-    use crate::{Flash, Region};
+    use crate::Flash;
 
     /// A [`Flash`] that already knows everything: an image covering `base..`.
-    pub fn loaded(region: &Region, base: u64, image: &[u8]) -> Flash {
-        let mut flash = Flash::new(region);
+    pub fn loaded(base: u64, image: &[u8]) -> Flash {
+        let mut flash = Flash::new();
         flash.insert(base, image);
         flash
     }

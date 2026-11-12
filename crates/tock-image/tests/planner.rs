@@ -51,7 +51,7 @@ impl Board {
     }
 
     fn flash(&self) -> Flash {
-        tock_image::testing::loaded(&self.region, self.region.start, &self.image)
+        tock_image::testing::loaded(self.region.start, &self.image)
     }
 
     fn apply(&mut self, req: Change) -> Result<(Plan, Vec<WriteRun>), PlanError> {
@@ -389,7 +389,7 @@ fn discovery_asks_only_for_what_it_needs() {
     let mut b = Board::new(cortex_m());
     b.apply(install(&[("a", 8000), ("b", 8000)])).unwrap();
     let full = b.flash();
-    let mut partial = Flash::new(&b.region);
+    let mut partial = Flash::new();
     let mut bytes_read = 0u64;
     let mut rounds = 0usize;
     let found = loop {
@@ -470,7 +470,7 @@ fn a_header_too_long_for_the_region_ends_the_list() {
     image[2..4].copy_from_slice(&0xFFFFu16.to_le_bytes());
     image[4..8].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
 
-    let flash = tock_image::testing::loaded(&region, region.start, &image);
+    let flash = tock_image::testing::loaded(region.start, &image);
     let found = discover(&region, &flash).expect("ends the list, does not read past it");
     assert_eq!(found.apps().count(), 0);
     assert_eq!(found.end(&region), region.start);
@@ -490,7 +490,7 @@ fn trailing_slack_too_small_for_a_header_ends_the_list() {
     let bytes = tbf.content_bytes();
     image[..bytes.len()].copy_from_slice(&bytes);
 
-    let flash = tock_image::testing::loaded(&region, region.start, &image);
+    let flash = tock_image::testing::loaded(region.start, &image);
     let found = discover(&region, &flash).expect("stops cleanly on a short tail");
     assert_eq!(found.apps().count(), 1);
     assert_eq!(found.end(&region), region.start + 2048);
@@ -511,7 +511,7 @@ fn an_app_list_that_exactly_fills_the_region_terminates() {
     let bytes = tbf.content_bytes();
     image[..bytes.len()].copy_from_slice(&bytes);
 
-    let flash = tock_image::testing::loaded(&region, region.start, &image);
+    let flash = tock_image::testing::loaded(region.start, &image);
     let found = discover(&region, &flash).expect("terminates with no room left");
     assert_eq!(found.apps().count(), 1);
     assert_eq!(found.end(&region), region.end());
