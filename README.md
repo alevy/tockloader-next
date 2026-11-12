@@ -121,6 +121,35 @@ Then `tock install`, with no flags, from anywhere in the project. Relative
 paths resolve against the file they were written in, not the working
 directory, so this works from a subdirectory too.
 
+## What is settled, and what is not
+
+Nothing here is stable yet, but the parts are not equally provisional, and
+guessing wrong about which is which costs time.
+
+**Settled enough to build on.** The board file and its layering --
+board file, user config, `Tock.toml`, `[devices.<name>]` -- with a recorded
+source for every value. The split between a pure core that asks for bytes and
+a caller that fetches them. Transports as executables speaking a framed
+protocol over stdio.
+
+**Experimental: every `TOCK_*` environment variable.** They fall into three
+groups and are provisional for three different reasons.
+
+| | |
+|---|---|
+| `TOCK_BOARD`, `TOCK_TRANSPORT`, `TOCK_DEVICE`, `TOCK_OPT_<KEY>` | A resolution layer duplicating what flags and files already say, and the only one that cannot express everything they can: `TOCK_OPT_SERIAL_PORT` cannot be told from an option named `serial_port`, so it reaches the default transport and no other. Whether the layer earns its place at all is open. |
+| `TOCK_CONTEXT`, `TOCK_CONTEXT_ERROR`, `TOCK_CONNECTION`, `TOCK_FORMAT` | How `tock` hands off to a subcommand, and so what a third-party `tock-<name>` binds to. The protocol is version 0 and this travels with it. |
+| `TOCK_CONFIG`, `TOCK_PROJECT` | Escape hatches for tests and CI, which pin the user config and project file. Useful, undesigned. |
+
+**Provisional flags.** `--device` names a saved set of choices rather than a
+device, which is a word this tool uses for three things and has not finished
+deciding about. `--opt`'s `transport.key=value` form is new and has not been
+used in anger. `--transport` replacing the whole routing table rather than
+merging into it is a guess at what someone typing it means.
+
+These get revisited once the system is complete enough to show which of them
+anyone actually reaches for.
+
 ## Tests
 
 ```sh

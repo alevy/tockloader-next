@@ -34,6 +34,9 @@ impl FileSource for Fs {
 /// `TOCK_PROJECT` names the project file outright, the way `TOCK_CONFIG` does
 /// for the user config; a value that is not a file means there is no project
 /// file, which is how a test or a CI job opts out of the walk up.
+///
+/// Experimental, and honestly so: both exist because the test suite needed
+/// them, and neither has been designed for anyone else.
 pub(crate) fn find_project() -> Option<PathBuf> {
     if let Some(pinned) = std::env::var_os("TOCK_PROJECT") {
         return Some(PathBuf::from(pinned)).filter(|p| p.is_file());
