@@ -272,7 +272,7 @@ fn project_file_drives_everything() {
     assert_eq!(names, vec!["app", "svc"]);
 
     let shown = ok(tock(&d, &["config", "show"]));
-    assert!(shown.contains("transport  file"), "{shown}");
+    assert!(shown.contains("transport  default -> file"), "{shown}");
     assert!(shown.contains("from project"), "{shown}");
     assert!(
         shown
@@ -365,17 +365,13 @@ fn the_file_transport_is_a_standalone_executable() {
             Request::Hello {
                 protocol: 0,
                 client: "test".into(),
+                needs: vec![],
             },
             vec![],
         )
         .unwrap();
     match hello {
-        Response::Hello {
-            transport,
-            capabilities,
-            ..
-        } => {
-            assert_eq!(transport, "file");
+        Response::Hello { capabilities, .. } => {
             assert!(capabilities.contains(&Capability::MemoryRead));
             assert!(capabilities.contains(&Capability::MemoryWrite));
         }
@@ -413,11 +409,12 @@ fn broker_serves_the_device() {
             Request::Hello {
                 protocol: 0,
                 client: "test".into(),
+                needs: vec![],
             },
             vec![],
         )
         .unwrap();
-    assert!(matches!(hello, Response::Hello { ref transport, .. } if transport == "file"));
+    assert!(matches!(hello, Response::Hello { .. }));
     let (_, data) = ch
         .call(
             Request::Read {
@@ -806,8 +803,7 @@ def call(msg):
     resp = json.loads(f.read(struct.unpack('<I', f.read(4))[0]))
     f.read(struct.unpack('<I', f.read(4))[0])
     return resp
-hello = call({"op": "hello", "protocol": 0, "client": "fdtest"})
-print("transport:", hello["transport"])
+hello = call({"op": "hello", "protocol": 0, "client": "fdtest", "needs": ["memory_read"]})
 print("caps:", ",".join(sorted(hello["capabilities"])))
 data = call({"op": "read", "address": 262144, "len": 8})
 print("read:", data["result"])
@@ -834,7 +830,13 @@ print("read:", data["result"])
         .output()
         .unwrap();
     let stdout = ok(out);
-    assert!(stdout.contains("transport: file"), "{stdout}");
+    // No transport name in the greeting: a broker may be serving several,
+    // and what a client can rely on is the capabilities, not who provides
+    // them.
+    assert!(
+        stdout.contains("caps: memory_read,memory_write"),
+        "{stdout}"
+    );
     assert!(stdout.contains("memory_read"), "{stdout}");
     assert!(stdout.contains("read: data"), "{stdout}");
 }
@@ -1302,6 +1304,164 @@ fn a_transport_without_a_console_refuses_up_front() {
     let out = tock(&d, &on_file(&opt, &["console"]));
     assert!(!out.status.success());
     let why = String::from_utf8_lossy(&out.stderr);
-    assert!(why.contains("console"), "{why}");
-    assert!(why.contains("capability"), "{why}");
+    // The broker knows the routing, so it can say which transport was asked
+    // and why that was wrong -- which `require()` on the far side could not.
+    assert!(
+        why.contains("`console` is routed to transport `file`"),
+        "{why}"
+    );
+    assert!(why.contains("does not provide it"), "{why}");
+}
+
+// --- capability routing --------------------------------------------------
+
+/// The reason routing exists: one board, two transports, chosen by what is
+/// being asked for rather than by what was typed.
+///
+/// Flash lives in a file and the console on a pseudo-terminal, which is as
+/// far apart as a debug probe and a USB-to-UART bridge. One connection
+/// reaches both, and neither request names a transport.
+#[test]
+fn one_connection_reaches_two_transports() {
+    use std::io::Write;
+    use tock_proto::{Capability, Connection, Request, Response, StreamChannel};
+
+    let d = Dir::new("routing-two");
+    d.erased("flash.bin");
+    let a = d.tab("a", 5000, None);
+    // Install over the file transport, the ordinary way, to have something
+    // to read back later.
+    ok(tock(
+        &d,
+        &on_file("path=flash.bin", &["install", a.to_str().unwrap()]),
+    ));
+
+    let (mut board, _keepalive, port) = pty();
+    std::fs::write(
+        d.path("Tock.toml"),
+        format!(
+            "board = \"nrf52840dk\"\n\n\
+             [transport]\n\
+             default = \"file\"\n\
+             console = \"serial\"\n\n\
+             [transports.file]\n\
+             path = \"flash.bin\"\n\n\
+             [transports.serial]\n\
+             port = \"{}\"\n\
+             write_pace_ms = 0\n",
+            port.display()
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .arg("broker")
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("none.toml"))
+        .env("TOCK_PROJECT", d.path("Tock.toml"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ch = StreamChannel {
+        reader: child.stdout.take().unwrap(),
+        writer: child.stdin.take().unwrap(),
+    };
+
+    // Declaring both is what lets the broker open both.
+    let (hello, _) = ch
+        .call(
+            Request::Hello {
+                protocol: 0,
+                client: "test".into(),
+                needs: vec![Capability::MemoryRead, Capability::Console],
+            },
+            vec![],
+        )
+        .unwrap();
+    match hello {
+        Response::Hello { capabilities, .. } => {
+            // The union of two transports, neither of which has both.
+            assert!(
+                capabilities.contains(&Capability::MemoryRead),
+                "{capabilities:?}"
+            );
+            assert!(
+                capabilities.contains(&Capability::Console),
+                "{capabilities:?}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // Flash, from the file.
+    let (_, data) = ch
+        .call(
+            Request::Read {
+                address: 0x40000,
+                len: 16,
+            },
+            vec![],
+        )
+        .unwrap();
+    assert_eq!(tbf::Lengths::parse(&data).unwrap().total_size, 8192);
+
+    // The console, from the pty, over the same connection.
+    board.write_all(b"tock$ ").unwrap();
+    board.flush().unwrap();
+    let mut said = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !said.windows(6).any(|w| w == b"tock$ ") {
+        let (_, heard) = ch
+            .call(
+                Request::ConsoleRead {
+                    max: 64,
+                    timeout_ms: 100,
+                },
+                vec![],
+            )
+            .unwrap();
+        said.extend_from_slice(&heard);
+    }
+    assert!(
+        said.windows(6).any(|w| w == b"tock$ "),
+        "console said {:?}",
+        String::from_utf8_lossy(&said)
+    );
+
+    ch.call(Request::Close, vec![]).unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// A route is a claim about a transport, and the transport is asked. A
+/// config that routes `console` somewhere that cannot do consoles is wrong
+/// in a way only the transport can confirm, so the error names both.
+#[test]
+fn a_route_to_a_transport_that_cannot_do_it_says_so() {
+    let d = Dir::new("routing-wrong");
+    let image = d.erased("flash.bin");
+    std::fs::write(
+        d.path("Tock.toml"),
+        format!(
+            "board = \"nrf52840dk\"\n\n\
+             [transport]\n\
+             default = \"file\"\n\
+             console = \"file\"\n\n\
+             [transports.file]\n\
+             path = \"{}\"\n",
+            image.display()
+        ),
+    )
+    .unwrap();
+    let out = tock(&d, &["console"]);
+    assert!(!out.status.success());
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        why.contains("`console` is routed to transport `file`"),
+        "{why}"
+    );
+    assert!(why.contains("does not provide it"), "{why}");
+    // And where that claim was made.
+    assert!(why.contains("Tock.toml"), "{why}");
 }

@@ -10,6 +10,7 @@ use clap::Parser;
 use tock_board::Context;
 use tock_client::{CliError, Code, connect, context, finish};
 use tock_image::{Change, NewApp};
+use tock_proto::Capability;
 
 #[path = "apps.rs"]
 mod apps;
@@ -62,7 +63,7 @@ fn run(args: &Args) -> Result<(), CliError> {
         include_sticky: args.include_sticky,
     };
 
-    let mut device = connect()?;
+    let mut device = connect(&[Capability::MemoryRead, Capability::MemoryWrite])?;
     let mut survey = apps::survey(&mut device, &ctx)?;
     apps::apply(&mut device, &mut survey, &change, args.dry_run)?.report(args.dry_run);
     Ok(())

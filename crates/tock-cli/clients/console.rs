@@ -47,7 +47,7 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &Args) -> Result<(), CliError> {
-    let mut device = connect()?;
+    let mut device = connect(&[Capability::Console])?;
     device
         .require(Capability::Console, "reading the console")
         .map_err(proto)?;
@@ -57,7 +57,7 @@ fn run(args: &Args) -> Result<(), CliError> {
     // Held for the loop; restores the terminal however this ends.
     let _raw = interactive.then(|| Raw::enter(stdin.as_raw_fd())).flatten();
     if interactive {
-        eprintln!("connected to {}; ^] to quit", device.transport);
+        eprintln!("connected; ^] to quit");
     }
 
     let mut out = std::io::stdout();

@@ -148,7 +148,6 @@ impl Connection for FileTransport {
             Request::Hello { .. } => Ok((
                 Response::Hello {
                     protocol: tock_proto::PROTOCOL_VERSION,
-                    transport: "file".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
                     capabilities: vec![Capability::MemoryRead, Capability::MemoryWrite],
                     options: options(),

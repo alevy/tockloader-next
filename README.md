@@ -94,14 +94,24 @@ tab = "blink.tab"
 ```
 
 A board's console is usually not reachable the way its flash is -- a
-USB-to-UART bridge is a console and nothing else -- so it is a transport of
-its own, asked for by name:
+USB-to-UART bridge is a console and nothing else -- so a board says which
+transport serves what, and `tock` routes each request accordingly:
 
-```sh
-tock --transport serial --opt port=/dev/ttyUSB0 console
+```toml
+[board.transport]        # in a board file; `default` covers the rest
+default = "openocd"
+console = "serial"
 ```
 
-`tock transports` lists what is installed and what each one reads.
+```toml
+[transports.serial]      # in your user config: which port is a fact about
+port = "/dev/ttyUSB0"    # your desk, not about the board
+```
+
+Then `tock list` reaches the flash and `tock console` reaches the console,
+neither naming a transport. `tock transports` lists what is installed and
+what each one reads; `tock config show` prints the routing and where every
+part of it came from.
 
 Then `tock install`, with no flags, from anywhere in the project. Relative
 paths resolve against the file they were written in, not the working

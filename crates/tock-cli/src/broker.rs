@@ -10,7 +10,9 @@
 //! subcommand that never touches a device -- building a TAB, say -- does not
 //! spawn one, and does not fail on a machine with no board attached.
 
-use tock_proto::{Client, Connection, ProtoError, Request, Response};
+use std::collections::BTreeMap;
+
+use tock_proto::{Capability, Client, Connection, ProtoError, Request, Response};
 
 use tock_client::{CliError, Code};
 
@@ -21,9 +23,29 @@ use crate::connection;
 pub(crate) struct Broker {
     settings: tock_board::Settings,
     trace: bool,
-    /// The connection to the transport, opened on demand. Not the device
-    /// itself -- this is the wire to it.
-    link: Option<Client>,
+    /// One link per transport we have had to open, by name.
+    ///
+    /// A map rather than one connection because a board need not be
+    /// reachable one way: flash may arrive over a debug probe while the
+    /// console arrives over a bridge soldered beside it, and a client that
+    /// asks for both gets both, each request going wherever its capability
+    /// is routed.
+    links: BTreeMap<String, Client>,
+}
+
+/// The capability a request needs, and so which transport serves it.
+///
+/// The one place a request is mapped to a capability. `Hello`, `Open` and
+/// `Close` are answered here and need nothing.
+fn needed_for(request: &Request) -> Option<Capability> {
+    Some(match request {
+        Request::Read { .. } => Capability::MemoryRead,
+        Request::Write { .. } => Capability::MemoryWrite,
+        Request::ConsoleRead { .. } | Request::ConsoleWrite => Capability::Console,
+        Request::Reset => Capability::Reset,
+        Request::Vendor { name, .. } => Capability::Vendor(name.clone()),
+        Request::Hello { .. } | Request::Open { .. } | Request::Close => return None,
+    })
 }
 
 impl Broker {
@@ -31,19 +53,71 @@ impl Broker {
         Broker {
             settings,
             trace,
-            link: None,
+            links: BTreeMap::new(),
         }
     }
 
-    /// Open on demand. A failure to open is fatal to the connection -- there
-    /// will never be a device -- so it travels as an error rather than a
-    /// response, carrying whatever the CLI would have told the user.
-    fn link(&mut self) -> Result<&mut Client, ProtoError> {
-        if self.link.is_none() {
-            let opened = connection::open(&self.settings, self.trace).map_err(fatal)?;
-            self.link = Some(opened);
+    /// The transport serving `capability`, opened if it is not already.
+    ///
+    /// A failure to open is fatal to the connection -- there will never be a
+    /// device -- so it travels as an error rather than a response, carrying
+    /// whatever the CLI would have told the user.
+    ///
+    /// Opened on demand rather than up front: a client that declares two
+    /// capabilities and only ever exercises one should only ever cost one
+    /// transport.
+    fn link_for(&mut self, capability: &Capability) -> Result<&mut Client, ProtoError> {
+        let name = self.route(capability).map_err(fatal)?;
+        if !self.links.contains_key(&name) {
+            let opened = connection::open(&self.settings, &name, self.trace).map_err(fatal)?;
+            // A route is a claim about a transport, and this is where it is
+            // checked against what the transport says of itself.
+            if !opened.capabilities.contains(capability) {
+                return Err(fatal(
+                    CliError::new(
+                        Code::Capability,
+                        format!(
+                            "`{}` is routed to transport `{name}`, which does not provide it",
+                            capability.name()
+                        ),
+                    )
+                    .detail(format!("from {}", self.route_source(capability)))
+                    .hint("tock transports -- to see what each one can do"),
+                ));
+            }
+            self.links.insert(name.clone(), opened);
         }
-        Ok(self.link.as_mut().expect("just opened"))
+        Ok(self.links.get_mut(&name).expect("just opened"))
+    }
+
+    /// Which transport a capability is routed to.
+    fn route(&self, capability: &Capability) -> Result<String, CliError> {
+        self.settings
+            .transport
+            .route(&capability.name())
+            .map(|sourced| sourced.value.clone())
+            .ok_or_else(|| {
+                CliError::new(
+                    Code::Config,
+                    format!(
+                        "nothing is routed to `{}` for this board",
+                        capability.name()
+                    ),
+                )
+                .hint(format!(
+                    "set it in your user config: [transport] {} = \"<name>\"",
+                    capability.name()
+                ))
+                .hint("tock transports -- to see what is installed")
+            })
+    }
+
+    fn route_source(&self, capability: &Capability) -> String {
+        self.settings
+            .transport
+            .route(&capability.name())
+            .map(|sourced| sourced.source.to_string())
+            .unwrap_or_default()
     }
 }
 
@@ -72,15 +146,31 @@ impl Connection for Broker {
         match request {
             // Answered here: the client did not open this transport and does
             // not get to say when it closes.
-            Request::Hello { .. } => {
-                let link = self.link()?;
+            // Answered here: the client did not open any of this and does
+            // not get to say when it closes. What it declared it needs is
+            // checked now, against the routing, so "nothing here can do
+            // that" arrives before the work rather than during it.
+            Request::Hello { needs, .. } => {
+                for capability in &needs {
+                    self.link_for(capability)?;
+                }
+                let mut capabilities: Vec<Capability> = self
+                    .links
+                    .values()
+                    .flat_map(|link| link.capabilities.iter().cloned())
+                    .collect();
+                capabilities.dedup();
+                let options = self
+                    .links
+                    .values()
+                    .flat_map(|link| link.options.iter().cloned())
+                    .collect();
                 Ok((
                     Response::Hello {
                         protocol: tock_proto::PROTOCOL_VERSION,
-                        transport: link.transport.clone(),
                         version: env!("CARGO_PKG_VERSION").into(),
-                        capabilities: link.capabilities.clone(),
-                        options: link.options.clone(),
+                        capabilities,
+                        options,
                     },
                     vec![],
                 ))
@@ -89,7 +179,10 @@ impl Connection for Broker {
             // The raw connection, not `Client::call`: a relay must hand a
             // refusal back as the refusal it is, rather than adopt it as its
             // own failure and hang up.
-            other => self.link()?.connection.call(other, payload),
+            other => {
+                let capability = needed_for(&other).expect("the rest are answered above");
+                self.link_for(&capability)?.connection.call(other, payload)
+            }
         }
     }
 }

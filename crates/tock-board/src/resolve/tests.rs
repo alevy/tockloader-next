@@ -2,6 +2,19 @@
 
 use super::*;
 
+/// The options of whichever transport the default route names. Every test
+/// here resolves a single transport, so this is unambiguous -- and keeping
+/// it in one place means the routing change did not scatter lookups through
+/// twenty assertions.
+fn options(ctx: &Settings) -> &BTreeMap<String, Sourced<toml::Value>> {
+    let name = &ctx
+        .transport
+        .route("default")
+        .expect("a default route")
+        .value;
+    ctx.transport.options.get(name).expect("its options")
+}
+
 struct Files(Vec<(&'static str, &'static str)>);
 impl FileSource for Files {
     fn read(&self, reference: &str, _rel: Option<&str>) -> Result<(String, String), Error> {
@@ -39,13 +52,16 @@ fn board_default_transport_and_options() {
     .unwrap();
     assert_eq!(ctx.board.info.name, "nrf52840dk");
     assert_eq!(ctx.board_file.source, Source::Project("Tock.toml".into()));
-    assert_eq!(ctx.transport.name.value, "openocd");
-    assert!(matches!(ctx.transport.name.source, Source::Board(_)));
+    assert_eq!(ctx.transport.route("default").unwrap().value, "openocd");
+    assert!(matches!(
+        ctx.transport.route("default").unwrap().source,
+        Source::Board(_)
+    ));
     // Both halves come from the board file: the chip, which is the same for
     // everyone, and a probe default, which is only right until someone
     // plugs in a different one.
     for key in ["target", "probe", "page_size"] {
-        let option = ctx.transport.options.get(key).expect(key);
+        let option = options(&ctx).get(key).expect(key);
         assert!(matches!(option.source, Source::Board(_)), "{key}");
     }
 }
@@ -80,19 +96,19 @@ fn precedence_flag_over_alias_over_project_over_user() {
     )
     .unwrap();
     // The alias beats the project file.
-    assert_eq!(ctx.transport.name.value, "jlink");
-    assert_eq!(ctx.transport.name.source, Source::Device("lab".into()));
+    assert_eq!(ctx.transport.route("default").unwrap().value, "jlink");
+    assert_eq!(
+        ctx.transport.route("default").unwrap().source,
+        Source::Device("lab".into())
+    );
     // Board < user < alias for options. `chip` is supplied only by the board
     // file, so its source proves the board layer reached the resolved set.
     assert_eq!(
-        ctx.transport.options["chip"].source,
+        options(&ctx)["chip"].source,
         Source::Board("bundled:nrf52840dk".into())
     );
-    assert_eq!(
-        ctx.transport.options["speed"].value.as_integer(),
-        Some(4000)
-    );
-    assert_eq!(ctx.transport.options["serial"].value.as_str(), Some("123"));
+    assert_eq!(options(&ctx)["speed"].value.as_integer(), Some(4000));
+    assert_eq!(options(&ctx)["serial"].value.as_str(), Some("123"));
 
     let flags = Layer {
         transport: Some("openocd".into()),
@@ -108,9 +124,9 @@ fn precedence_flag_over_alias_over_project_over_user() {
         &Files(vec![]),
     )
     .unwrap();
-    assert_eq!(ctx.transport.name.value, "openocd");
+    assert_eq!(ctx.transport.route("default").unwrap().value, "openocd");
     assert_eq!(
-        ctx.transport.options["speed"].source,
+        options(&ctx)["speed"].source,
         Source::Flag("--opt speed".into())
     );
 }
@@ -136,15 +152,12 @@ fn project_transport_options_beat_the_board_file() {
     )
     .unwrap();
     assert_eq!(
-        ctx.transport.options["config"].source,
+        options(&ctx)["config"].source,
         Source::Project("Tock.toml".into())
     );
-    assert_eq!(
-        ctx.transport.options["speed"].value.as_integer(),
-        Some(9000)
-    );
+    assert_eq!(options(&ctx)["speed"].value.as_integer(), Some(9000));
     // A table for a transport that was not selected contributes nothing.
-    assert!(!ctx.transport.options.contains_key("chip"));
+    assert!(!options(&ctx).contains_key("chip"));
 }
 
 #[test]
@@ -169,15 +182,9 @@ fn alias_options_beat_project_options() {
         &Files(vec![]),
     )
     .unwrap();
-    assert_eq!(
-        ctx.transport.options["serial"].value.as_str(),
-        Some("from-alias")
-    );
+    assert_eq!(options(&ctx)["serial"].value.as_str(), Some("from-alias"));
     // ...and project still beats user config.
-    assert_eq!(
-        ctx.transport.options["speed"].value.as_integer(),
-        Some(9000)
-    );
+    assert_eq!(options(&ctx)["speed"].value.as_integer(), Some(9000));
 }
 
 #[test]
@@ -196,12 +203,9 @@ fn env_options_beat_project_and_lose_to_flags() {
     let mut i = inputs(Layer::default(), Some(("Tock.toml".into(), &project)), None);
     i.env = env_layer();
     let ctx = resolve(&i, &Files(vec![])).unwrap();
+    assert_eq!(options(&ctx)["path"].value.as_str(), Some("from-env"));
     assert_eq!(
-        ctx.transport.options["path"].value.as_str(),
-        Some("from-env")
-    );
-    assert_eq!(
-        ctx.transport.options["path"].source,
+        options(&ctx)["path"].source,
         Source::Env("TOCK_OPT_PATH".into())
     );
 
@@ -212,10 +216,7 @@ fn env_options_beat_project_and_lose_to_flags() {
     let mut i = inputs(flags, Some(("Tock.toml".into(), &project)), None);
     i.env = env_layer();
     let ctx = resolve(&i, &Files(vec![])).unwrap();
-    assert_eq!(
-        ctx.transport.options["path"].value.as_str(),
-        Some("from-flag")
-    );
+    assert_eq!(options(&ctx)["path"].value.as_str(), Some("from-flag"));
 }
 
 #[test]
@@ -325,8 +326,8 @@ fn board_files_use_snake_case_keys_and_values() {
     let ctx = resolve(&inputs(flags, None, None), &files).unwrap();
     assert!(ctx.board.layout.app_ram.is_some());
     // Transport names stay as they are: `probe-rs` names an executable.
-    assert_eq!(ctx.transport.name.value, "probe-rs");
-    assert_eq!(ctx.transport.options["chip"].value.as_str(), Some("X"));
+    assert_eq!(ctx.transport.route("default").unwrap().value, "probe-rs");
+    assert_eq!(options(&ctx)["chip"].value.as_str(), Some("X"));
 }
 
 #[test]

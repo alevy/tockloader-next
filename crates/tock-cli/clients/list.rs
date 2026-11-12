@@ -8,6 +8,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use tock_client::{CliError, connect, context, finish};
+use tock_proto::Capability;
 
 #[path = "apps.rs"]
 mod apps;
@@ -28,7 +29,7 @@ fn main() -> ExitCode {
 
 fn run(json: bool) -> Result<(), CliError> {
     let ctx = context()?;
-    let mut device = connect()?;
+    let mut device = connect(&[Capability::MemoryRead])?;
     let survey = apps::survey(&mut device, &ctx)?;
     let found = &survey.found;
 

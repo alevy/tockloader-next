@@ -251,7 +251,6 @@ impl Connection for SerialTransport {
             Request::Hello { .. } => Ok((
                 Response::Hello {
                     protocol: tock_proto::PROTOCOL_VERSION,
-                    transport: "serial".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
                     capabilities: vec![Capability::Console],
                     options: options(),

@@ -10,7 +10,9 @@ mod resolve;
 mod size;
 
 pub use board::{BUNDLED, BoardFile, BoardInfo, Layout, Range, bundled};
-pub use config::{DeviceAlias, ProjectApp, ProjectFile, ProjectKernel, UserConfig};
+pub use config::{
+    DEFAULT_ROUTE, DeviceAlias, ProjectApp, ProjectFile, ProjectKernel, Transport, UserConfig,
+};
 pub use resolve::{
     Board, Context, Inputs, Layer, Settings, Source, Sourced, TransportContext, env_option_key,
     resolve,

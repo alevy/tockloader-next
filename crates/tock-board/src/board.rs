@@ -46,10 +46,10 @@ pub struct BoardInfo {
     pub description: String,
     /// Architecture name used to pick TBFs from TABs.
     pub arch: String,
-    /// How this board is normally reached. A fact about the board, like its
+    /// How this board is reached. A fact about the board, like its
     /// architecture -- and the same key `Tock.toml` and the user config use,
-    /// either of which may override it.
-    pub transport: Option<String>,
+    /// either of which may override it, per capability.
+    pub transport: Option<crate::Transport>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -143,8 +143,8 @@ impl BoardFile {
         self.layout.app_ram.map(|r| (r.start.0, r.size.0))
     }
 
-    pub fn default_transport(&self) -> Option<&str> {
-        self.info.transport.as_deref()
+    pub fn transport(&self) -> Option<&crate::Transport> {
+        self.info.transport.as_ref()
     }
 
     pub fn transport_options(&self, transport: &str) -> Option<&toml::Table> {

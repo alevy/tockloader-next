@@ -156,7 +156,6 @@ impl Connection for Stingy {
 fn a_short_read_is_an_error_not_a_silent_retry() {
     let mut client = Client {
         connection: Box::new(Stingy),
-        transport: "stingy".into(),
         version: "0".into(),
         capabilities: vec![Capability::MemoryRead],
         options: vec![],
@@ -176,7 +175,6 @@ fn undeclared_options_are_the_ones_the_far_end_never_claimed() {
     };
     let client = |options: Vec<OptionSpec>| Client {
         connection: Box::new(Stingy),
-        transport: "t".into(),
         version: "0".into(),
         capabilities: vec![],
         options,
@@ -214,7 +212,7 @@ fn an_error_without_keys_or_details_still_parses() {
 /// The same for a `Hello` that declares no options.
 #[test]
 fn a_hello_without_options_still_parses() {
-    let old = r#"{"result":"hello","protocol":0,"transport":"t","version":"1","capabilities":[]}"#;
+    let old = r#"{"result":"hello","protocol":0,"version":"1","capabilities":[]}"#;
     let parsed: Response = serde_json::from_str(old).unwrap();
     match parsed {
         Response::Hello { options, .. } => assert!(options.is_empty()),

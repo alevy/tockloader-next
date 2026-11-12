@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use tock_image::{Placement, Region};
 
-use crate::{BoardFile, Error, FileSource, ProjectFile, UserConfig};
+use crate::{BoardFile, DEFAULT_ROUTE, Error, FileSource, ProjectFile, Transport, UserConfig};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "from", content = "at", rename_all = "snake_case")]
@@ -78,8 +78,32 @@ pub struct Inputs<'a> {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TransportContext {
-    pub name: Sourced<String>,
-    pub options: BTreeMap<String, Sourced<toml::Value>>,
+    /// Capability name, or [`DEFAULT_ROUTE`], to the transport that serves
+    /// it. Layered per key, so a board file's `default` survives a user
+    /// config overriding only `console`.
+    pub routes: BTreeMap<String, Sourced<String>>,
+    /// Resolved options, per transport named by a route. Only the routed
+    /// ones: a `[transports.probe-rs]` table for a transport nothing routes
+    /// to is never consulted, which is what lets a board file carry options
+    /// for transports that are not installed.
+    pub options: BTreeMap<String, BTreeMap<String, Sourced<toml::Value>>>,
+}
+
+impl TransportContext {
+    /// The transport serving `capability`, falling back to the default.
+    pub fn route(&self, capability: &str) -> Option<&Sourced<String>> {
+        self.routes
+            .get(capability)
+            .or_else(|| self.routes.get(DEFAULT_ROUTE))
+    }
+
+    /// Every transport any route names, in a stable order.
+    pub fn routed(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.routes.values().map(|s| s.value.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -97,11 +121,13 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Transport options as a plain table, for handing to a transport.
-    pub fn transport_options(&self) -> toml::Table {
+    /// One transport's options as a plain table, for handing to it.
+    pub fn transport_options(&self, name: &str) -> toml::Table {
         self.transport
             .options
-            .iter()
+            .get(name)
+            .into_iter()
+            .flatten()
             .map(|(k, v)| (k.clone(), v.value.clone()))
             .collect()
     }
@@ -112,7 +138,7 @@ impl Settings {
     /// it can offer: `path = "flash.bin"` is relative to whichever file said
     /// so, and only [`Sourced`] knows which that was. Absolute, because a
     /// transport or a `tock broker` client does not reliably share `cwd`.
-    pub fn option_bases(&self, cwd: &Path) -> BTreeMap<String, String> {
+    pub fn option_bases(&self, name: &str, cwd: &Path) -> BTreeMap<String, String> {
         let dir_of = |origin: Option<&String>| {
             // A board reference like `bundled:nrf52840dk` is not a file and
             // has no directory; values from one cannot be relative paths.
@@ -129,7 +155,9 @@ impl Settings {
 
         self.transport
             .options
-            .iter()
+            .get(name)
+            .into_iter()
+            .flatten()
             .map(|(key, sourced)| {
                 let origin = match &sourced.source {
                     // Flags and the environment are written at a prompt, not
@@ -265,78 +293,114 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Erro
     };
     let (board, board_origin) = BoardFile::load(&board_ref.value, relative_to, files)?;
 
-    let transport = pick(&[
-        (
-            inputs.flags.transport.as_ref(),
-            Source::Flag("--transport".into()),
-        ),
-        (
-            inputs.env.transport.as_ref(),
-            Source::Env("TOCK_TRANSPORT".into()),
-        ),
-        (
-            alias.as_ref().and_then(|(_, a)| a.transport.as_ref()),
-            alias_source(),
-        ),
-        (
-            project.and_then(|(_, p)| p.transport.as_ref()),
-            project_source(),
-        ),
-    ])
-    .or_else(|| {
-        board.default_transport().map(|t| Sourced {
-            value: t.to_string(),
-            source: Source::Board(board_origin.clone()),
-        })
-    })
-    .ok_or_else(|| Error::NoTransport(board.info.name.clone()))?;
-
-    // Options, lowest precedence first so later layers overwrite.
-    let mut options = BTreeMap::new();
-    let mut layer = |table: Option<&toml::Table>, source: Source| {
-        for (k, v) in table.into_iter().flatten() {
-            options.insert(
-                k.clone(),
+    // Routes layer per capability, lowest precedence first, the way options
+    // do -- so a board file saying `default = "openocd", console = "serial"`
+    // survives a user config that names only `console`.
+    let mut routes: BTreeMap<String, Sourced<String>> = BTreeMap::new();
+    let mut route = |choice: Option<&Transport>, source: Source| {
+        for (capability, name) in choice.into_iter().flat_map(Transport::routes) {
+            routes.insert(
+                capability,
                 Sourced {
-                    value: v.clone(),
+                    value: name,
                     source: source.clone(),
                 },
             );
         }
     };
-    layer(
-        board.transport_options(&transport.value),
-        Source::Board(board_origin.clone()),
-    );
+    route(board.transport(), Source::Board(board_origin.clone()));
     if let Some((origin, u)) = user {
-        layer(
-            u.transports.get(&transport.value),
-            Source::User(origin.clone()),
-        );
+        route(u.transport.as_ref(), Source::User(origin.clone()));
     }
     if let Some((_, p)) = project {
-        layer(p.transports.get(&transport.value), project_source());
+        route(p.transport.as_ref(), project_source());
     }
     if let Some((_, a)) = &alias {
-        layer(Some(&a.options), alias_source());
+        route(a.transport.as_ref(), alias_source());
     }
-    for (k, v) in &inputs.env.options {
-        options.insert(
-            k.clone(),
-            Sourced {
-                value: parse_option_value(v),
-                source: Source::Env(env_option_var(k)),
-            },
-        );
+    // A name given outright means that transport for everything, which is
+    // what someone typing `--transport serial` means. It replaces the table
+    // rather than adding to it.
+    for (value, source) in [
+        (
+            inputs.env.transport.as_ref(),
+            Source::Env("TOCK_TRANSPORT".into()),
+        ),
+        (
+            inputs.flags.transport.as_ref(),
+            Source::Flag("--transport".into()),
+        ),
+    ] {
+        if let Some(name) = value {
+            routes.clear();
+            routes.insert(
+                DEFAULT_ROUTE.to_string(),
+                Sourced {
+                    value: name.clone(),
+                    source,
+                },
+            );
+        }
     }
-    for (k, v) in &inputs.flags.options {
-        options.insert(
-            k.clone(),
-            Sourced {
-                value: parse_option_value(v),
-                source: Source::Flag(format!("--opt {k}")),
-            },
+    if routes.is_empty() {
+        return Err(Error::NoTransport(board.info.name.clone()));
+    }
+
+    // Options, lowest precedence first so later layers overwrite -- and now
+    // once per transport any route names, because a client may need two of
+    // them and each has its own.
+    let mut options: BTreeMap<String, BTreeMap<String, Sourced<toml::Value>>> = BTreeMap::new();
+    let routed: Vec<String> = {
+        let mut names: Vec<String> = routes.values().map(|s| s.value.clone()).collect();
+        names.sort();
+        names.dedup();
+        names
+    };
+    for name in routed {
+        let mut resolved: BTreeMap<String, Sourced<toml::Value>> = BTreeMap::new();
+        let mut layer = |table: Option<&toml::Table>, source: Source| {
+            for (k, v) in table.into_iter().flatten() {
+                resolved.insert(
+                    k.clone(),
+                    Sourced {
+                        value: v.clone(),
+                        source: source.clone(),
+                    },
+                );
+            }
+        };
+        layer(
+            board.transport_options(&name),
+            Source::Board(board_origin.clone()),
         );
+        if let Some((origin, u)) = user {
+            layer(u.transports.get(&name), Source::User(origin.clone()));
+        }
+        if let Some((_, p)) = project {
+            layer(p.transports.get(&name), project_source());
+        }
+        if let Some((_, a)) = &alias {
+            layer(Some(&a.options), alias_source());
+        }
+        for (k, v) in &inputs.env.options {
+            resolved.insert(
+                k.clone(),
+                Sourced {
+                    value: parse_option_value(v),
+                    source: Source::Env(env_option_var(k)),
+                },
+            );
+        }
+        for (k, v) in &inputs.flags.options {
+            resolved.insert(
+                k.clone(),
+                Sourced {
+                    value: parse_option_value(v),
+                    source: Source::Flag(format!("--opt {k}")),
+                },
+            );
+        }
+        options.insert(name, resolved);
     }
 
     Ok(Settings {
@@ -345,10 +409,7 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Erro
             source: board_ref.source,
         },
         board,
-        transport: TransportContext {
-            name: transport,
-            options,
-        },
+        transport: TransportContext { routes, options },
         device,
         project: project.map(|(o, _)| o.clone()),
         user: user.map(|(o, _)| o.clone()),
