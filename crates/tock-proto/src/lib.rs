@@ -355,8 +355,23 @@ pub enum ErrorKind {
 /// - **The connection failed.** `Err(..)`. The pipe broke, a frame was
 ///   malformed, the peer went away. Nothing further can be sent.
 ///
+/// The test is **whether there is still an answer to give**, and it is not
+/// answered by what kind of error turned up. The same `std::io::Error` is
+/// either one depending on what it was against: a failed seek in a flash
+/// image is an operation that failed, because the image is the device and
+/// the pipe carrying this conversation is untouched; a failed write to the
+/// socket driving a debug server is the connection, because that socket is
+/// how anything further would be said.
+///
+/// So each responder classifies its own, and this crate offers no conversion
+/// that would decide it for them. It used to, and the only responder with
+/// both kinds had to override it -- quietly, so the two shipped transports
+/// disagreed about the same type for a year without anyone noticing.
+///
 /// An implementation that cannot fail at the second level simply never
-/// returns `Err`, the way an in-memory writer never fails.
+/// returns `Err`, the way an in-memory writer never fails. That is a fact
+/// about what it talks to, not a shortcut: a flash image on disk has no
+/// second kind to report.
 pub trait Connection {
     fn call(
         &mut self,
@@ -831,16 +846,6 @@ impl From<ProtoError> for Response {
             },
             other => Response::error(ErrorKind::Device, other.to_string()),
         }
-    }
-}
-
-/// An I/O failure inside a transport is a device error. Having the conversion
-/// here means a transport can use `?` on ordinary `std::io` calls and return
-/// `Result<_, Response>` throughout, instead of each one inventing its own
-/// error plumbing.
-impl From<std::io::Error> for Response {
-    fn from(e: std::io::Error) -> Response {
-        Response::error(ErrorKind::Device, e.to_string())
     }
 }
 
