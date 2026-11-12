@@ -178,7 +178,7 @@ impl Settings {
     /// so, and only [`Sourced`] knows which that was. Absolute, because a
     /// transport or a `tock broker` client does not reliably share `cwd`.
     pub fn option_bases(&self, name: &str, cwd: &Path) -> BTreeMap<String, String> {
-        let dir_of = |origin: Option<&String>| {
+        let dir_of = |origin: Option<&str>| {
             // A board reference like `bundled:nrf52840dk` is not a file and
             // has no directory; values from one cannot be relative paths.
             let Some(path) = origin.filter(|o| !o.starts_with("bundled:")).map(Path::new) else {
@@ -198,15 +198,7 @@ impl Settings {
             .into_iter()
             .flatten()
             .map(|(key, sourced)| {
-                let origin = match &sourced.source {
-                    // Flags and the environment are written at a prompt, not
-                    // in a file, so their base is wherever we were run.
-                    Source::Flag(_) | Source::Env(_) => None,
-                    // An alias records only its own name, so the file it was
-                    // written in is the user config.
-                    Source::Device(_) => self.user.as_ref(),
-                    Source::Project(o) | Source::User(o) | Source::Board(o) => Some(o),
-                };
+                let origin = written_in(&sourced.source, self.user.as_deref());
                 (key.clone(), dir_of(origin).display().to_string())
             })
             .collect()
@@ -325,11 +317,7 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Erro
         ),
     ])
     .ok_or(Error::NoBoard)?;
-    let relative_to = match &board_ref.source {
-        Source::Project(origin) => Some(origin.as_str()),
-        Source::User(origin) => Some(origin.as_str()),
-        _ => None,
-    };
+    let relative_to = written_in(&board_ref.source, user.map(|(origin, _)| origin.as_str()));
     let (board, board_origin) = BoardFile::load(&board_ref.value, relative_to, files)?;
 
     // Routes layer per capability, lowest precedence first, the way options
@@ -520,6 +508,27 @@ fn alias_options<'a>(
         }
     }
     Some(std::borrow::Cow::Owned(plain))
+}
+
+/// The file a value was written in, which is not always the one its
+/// [`Source`] names.
+///
+/// An alias records only its own name -- `--device lab` says nothing about
+/// where `lab` is written -- so a value that came from one was written in
+/// the user config. A flag or an environment variable is typed at a prompt
+/// and was written in no file at all, so a relative path in one belongs to
+/// the working directory.
+///
+/// One function rather than the rule restated at each use, because it was
+/// got wrong once that way: a relative board path in an alias resolved
+/// against the working directory, so `[devices.lab] board = "./mine.toml"`
+/// worked from the directory holding the user config and nowhere else.
+fn written_in<'a>(source: &'a Source, user: Option<&'a str>) -> Option<&'a str> {
+    match source {
+        Source::Project(origin) | Source::User(origin) | Source::Board(origin) => Some(origin),
+        Source::Device(_) => user,
+        Source::Flag(_) | Source::Env(_) => None,
+    }
 }
 
 /// Accept TOML values (numbers, booleans, arrays); anything else is a string.

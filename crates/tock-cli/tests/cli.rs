@@ -1465,3 +1465,42 @@ fn a_route_to_a_transport_that_cannot_do_it_says_so() {
     // And where that claim was made.
     assert!(why.contains("Tock.toml"), "{why}");
 }
+
+/// A board path in a `[devices.<name>]` alias belongs to the user config,
+/// the same as every other path written there.
+///
+/// This resolved against the working directory instead, so the same alias
+/// worked from the directory holding the config and nowhere else -- and
+/// since a user config lives in `~/.config`, that is nowhere anyone runs
+/// from. Run from a subdirectory, which is where it used to break.
+#[test]
+fn an_alias_board_path_resolves_against_the_user_config() {
+    let d = Dir::new("alias_board_path");
+    std::fs::create_dir_all(d.path("cfg")).unwrap();
+    std::fs::write(
+        d.path("cfg/mine.toml"),
+        "[board]\nname = \"mine\"\narch = \"cortex-m4\"\n\n\
+         [layout]\n\
+         flash = { start = 0x0, size = \"1M\" }\n\
+         kernel = { start = 0x0, size = \"256K\" }\n\
+         apps = { start = 0x40000, size = \"768K\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        d.path("cfg/config.toml"),
+        "[devices.lab]\nboard = \"./mine.toml\"\ntransport = \"file\"\npath = \"img.bin\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(d.path("elsewhere")).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["--device", "lab", "config", "show"])
+        .current_dir(d.path("elsewhere"))
+        .env("TOCK_CONFIG", d.path("cfg/config.toml"))
+        .env("TOCK_PROJECT", d.path("Tock.toml"))
+        .output()
+        .unwrap();
+    let shown = ok(out);
+    assert!(shown.contains("board      mine"), "{shown}");
+    assert!(shown.contains("device `lab` in user config"), "{shown}");
+}
