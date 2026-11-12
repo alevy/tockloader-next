@@ -573,3 +573,153 @@ fn a_board_path_in_a_project_file_is_relative_to_it() {
     let asked = asked.0.borrow();
     assert_eq!(asked[0].1.as_deref(), Some("/repo/Tock.toml"));
 }
+
+/// A machine with one board on it should be able to say so once.
+#[test]
+fn a_user_config_can_name_the_board() {
+    let user = UserConfig::parse(
+        "/home/me/config.toml",
+        "board = \"nrf52840dk\"\ntransport = \"file\"\n",
+    )
+    .unwrap();
+    let ctx = resolve(
+        &inputs(
+            Layer::default(),
+            None,
+            Some(("/home/me/config.toml".into(), &user)),
+        ),
+        &Files(vec![]),
+    )
+    .unwrap();
+    assert_eq!(ctx.board.info.name, "nrf52840dk");
+    assert_eq!(
+        ctx.board_file.source,
+        Source::User("/home/me/config.toml".into())
+    );
+}
+
+/// And a project file still outranks it, because a project's board is a
+/// fact about the work and a user config's is a habit.
+#[test]
+fn a_project_file_beats_the_user_config() {
+    let user = UserConfig::parse("/home/me/config.toml", "board = \"nrf52840dk\"\n").unwrap();
+    let project = ProjectFile {
+        board: Some("raspberry_pi_pico_2".into()),
+        transport: Some("file".into()),
+        ..Default::default()
+    };
+    let ctx = resolve(
+        &inputs(
+            Layer::default(),
+            Some(("Tock.toml".into(), &project)),
+            Some(("/home/me/config.toml".into(), &user)),
+        ),
+        &Files(vec![]),
+    )
+    .unwrap();
+    assert_eq!(ctx.board.info.name, "raspberry_pi_pico_2");
+}
+
+/// A path in a user config belongs to that file, like one in an alias. This
+/// arm of `written_in` was correct and unreachable until the user config
+/// could name a board at all.
+#[test]
+fn a_board_path_in_a_user_config_is_relative_to_it() {
+    const CONFIG: &str = "/home/me/.config/tock/config.toml";
+    let user =
+        UserConfig::parse(CONFIG, "board = \"./mine.toml\"\ntransport = \"file\"\n").unwrap();
+    let asked = Asked::default();
+    resolve(
+        &inputs(Layer::default(), None, Some((CONFIG.into(), &user))),
+        &asked,
+    )
+    .unwrap();
+    let asked = asked.0.borrow();
+    assert_eq!(asked[0].0, "./mine.toml");
+    assert_eq!(asked[0].1.as_deref(), Some(CONFIG));
+}
+
+/// An alias bundles a board, a transport and its options, and `device` in a
+/// user config is how it gets chosen without typing `--device` every time.
+#[test]
+fn a_user_config_can_default_to_a_device() {
+    let user = UserConfig::parse(
+        "/home/me/config.toml",
+        r#"
+        device = "lab"
+        [devices.lab]
+        board = "nrf52840dk"
+        transport = "file"
+        path = "img.bin"
+        "#,
+    )
+    .unwrap();
+    let ctx = resolve(
+        &inputs(
+            Layer::default(),
+            None,
+            Some(("/home/me/config.toml".into(), &user)),
+        ),
+        &Files(vec![]),
+    )
+    .unwrap();
+    assert_eq!(ctx.board.info.name, "nrf52840dk");
+    assert_eq!(ctx.transport.route("default").unwrap().value, "file");
+    assert_eq!(options(&ctx)["path"].value.as_str(), Some("img.bin"));
+    assert_eq!(ctx.device.as_ref().unwrap().value, "lab");
+}
+
+/// The asymmetry the design turns on, and the reason `device` in a user
+/// config is not simply another layer.
+///
+/// Naming a device is an act and beats a project file. Having one as your
+/// default is a preference and must not -- otherwise checking out someone
+/// else's project and running `tock install` would quietly use your board's
+/// address map rather than theirs.
+#[test]
+fn a_default_device_yields_to_a_project_but_a_chosen_one_does_not() {
+    let user = UserConfig::parse(
+        "/home/me/config.toml",
+        r#"
+        device = "lab"
+        [devices.lab]
+        board = "nrf52840dk"
+        transport = "file"
+        "#,
+    )
+    .unwrap();
+    let project = ProjectFile {
+        board: Some("raspberry_pi_pico_2".into()),
+        transport: Some("file".into()),
+        ..Default::default()
+    };
+    let at = |flags: Layer| {
+        resolve(
+            &inputs(
+                flags,
+                Some(("Tock.toml".into(), &project)),
+                Some(("/home/me/config.toml".into(), &user)),
+            ),
+            &Files(vec![]),
+        )
+        .unwrap()
+        .board
+        .info
+        .name
+        .clone()
+    };
+
+    assert_eq!(
+        at(Layer::default()),
+        "raspberry_pi_pico_2",
+        "merely default"
+    );
+    assert_eq!(
+        at(Layer {
+            device: Some("lab".into()),
+            ..Default::default()
+        }),
+        "nrf52840dk",
+        "the same alias, asked for"
+    );
+}

@@ -79,6 +79,21 @@ Global flags go before the subcommand. `--format` belongs to `tock`, and
 `tock` hands a subcommand its arguments untouched -- so `install --format
 json` is `tock-install`'s to reject, and it does.
 
+If it is always the same board on the same desk, say so once in
+`~/.config/tock/config.toml` instead:
+
+```toml
+device = "lab"           # which of the below is yours, by default
+
+[devices.lab]
+board = "nrf52840dk"     # or a path, relative to this file
+transport = "openocd"
+```
+
+A project that names its own board still wins: naming a device is an act,
+having one is a habit, and checking out someone else's work should not
+quietly use your board's address map.
+
 Or put the settings in a `Tock.toml`, next to the apps:
 
 ```toml

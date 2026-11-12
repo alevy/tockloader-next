@@ -7,20 +7,43 @@
 //! `serial_port`, so it reaches the default transport and no other. Whether
 //! it earns its place is open -- see the README.
 //!
-//! Precedence, highest first, for each setting:
+//! Layering, highest first. It is not one order for everything: the
+//! settings differ in how they combine, and a single list presented as
+//! though they did not was accurate for none of them.
 //!
-//! 1. command-line flag
-//! 2. environment variable (`TOCK_BOARD`, `TOCK_TRANSPORT`, `TOCK_DEVICE`, and
-//!    `TOCK_OPT_<KEY>` for transport options)
-//! 3. the selected device alias from the user config
-//! 4. project file (`Tock.toml`)
+//! **`board`** and **`device`** -- first one wins.
+//!
+//! 1. `--board` / `--device`
+//! 2. `TOCK_BOARD` / `TOCK_DEVICE`
+//! 3. the selected device alias (`board` only, and only when the alias was
+//!    chosen outright -- see below)
+//! 4. project file
 //! 5. user config
-//! 6. board file
+//! 6. the alias again, when it is merely the default
 //!
-//! Transport options layer per key, highest first: `--opt`, `TOCK_OPT_<KEY>`,
-//! device alias, `[transports.<name>]` in the project file,
-//! `[transports.<name>]` in the user config, the same table in the
-//! board file.
+//! **`transport`** -- merged per capability, so a user config naming only
+//! `console` keeps the board file's `default`. Lowest first: board file,
+//! user config, project file, alias. `TOCK_TRANSPORT` and `--transport`
+//! then replace the table outright, since naming one transport means that
+//! one for everything.
+//!
+//! **Transport options** -- merged per key, resolved separately for each
+//! routed transport. Lowest first: board file, user config, project file,
+//! alias, `TOCK_OPT_<KEY>`, `--opt`. A qualified `--opt serial.port=X`
+//! reaches that transport alone; an unqualified one means whichever serves
+//! `default`.
+//!
+//! # Choosing an alias, and defaulting to one
+//!
+//! Naming a device is an act; having one is a preference. `--device lab`
+//! says to use that board now, and beats a project file. A `device = "lab"`
+//! in a user config says which is yours when nothing else has an opinion,
+//! and must not reach over a board a project declares -- otherwise checking
+//! out someone's project and running `tock install` would quietly use your
+//! board's address map rather than theirs.
+//!
+//! So the same alias contributes at two different heights depending on how
+//! it was reached, and the height is the only difference.
 //!
 //! Every resolved value carries its [`Source`], so `tock config show` can
 //! explain all of it.
@@ -32,7 +55,9 @@ use serde::{Deserialize, Serialize};
 
 use tock_image::{Placement, Region};
 
-use crate::{BoardFile, DEFAULT_ROUTE, Error, FileSource, ProjectFile, Transport, UserConfig};
+use crate::{
+    BoardFile, DEFAULT_ROUTE, DeviceAlias, Error, FileSource, ProjectFile, Transport, UserConfig,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "from", content = "at", rename_all = "snake_case")]
@@ -295,7 +320,16 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Erro
                 Source::Project(o.clone())
             }),
         ),
+        (
+            user.and_then(|(_, u)| u.device.as_ref()),
+            user.map_or(Source::User(String::new()), |(o, _)| {
+                Source::User(o.clone())
+            }),
+        ),
     ]);
+    // Whether the alias was asked for or merely fallen back on, which is the
+    // only thing that decides how high its values sit.
+    let defaulted = matches!(device.as_ref().map(|d| &d.source), Some(Source::User(_)));
     let alias = device.as_ref().and_then(|d| {
         user.and_then(|(_, u)| u.devices.get(&d.value))
             .map(|a| (d.value.clone(), a))
@@ -303,18 +337,29 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Erro
     let alias_source =
         || Source::Device(alias.as_ref().map(|(n, _)| n.clone()).unwrap_or_default());
     let project_source = || Source::Project(project.map(|(o, _)| o.clone()).unwrap_or_default());
+    let user_source = || Source::User(user.map(|(o, _)| o.clone()).unwrap_or_default());
+    let from_alias = |pick: fn(&DeviceAlias) -> Option<&String>| {
+        alias.as_ref().and_then(|(_, a)| pick(a)).cloned()
+    };
 
+    // The alias sits above the project file when it was named, and below the
+    // user config's own settings when it is just the default.
+    let chosen_alias = (!defaulted)
+        .then(|| from_alias(|a| a.board.as_ref()))
+        .flatten();
+    let default_alias = defaulted
+        .then(|| from_alias(|a| a.board.as_ref()))
+        .flatten();
     let board_ref = pick(&[
         (inputs.flags.board.as_ref(), Source::Flag("--board".into())),
         (inputs.env.board.as_ref(), Source::Env("TOCK_BOARD".into())),
-        (
-            alias.as_ref().and_then(|(_, a)| a.board.as_ref()),
-            alias_source(),
-        ),
+        (chosen_alias.as_ref(), alias_source()),
         (
             project.and_then(|(_, p)| p.board.as_ref()),
             project_source(),
         ),
+        (default_alias.as_ref(), alias_source()),
+        (user.and_then(|(_, u)| u.board.as_ref()), user_source()),
     ])
     .ok_or(Error::NoBoard)?;
     let relative_to = written_in(&board_ref.source, user.map(|(origin, _)| origin.as_str()));
@@ -339,11 +384,18 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Erro
     if let Some((origin, u)) = user {
         route(u.transport.as_ref(), Source::User(origin.clone()));
     }
+    if defaulted {
+        if let Some((_, a)) = &alias {
+            route(a.transport.as_ref(), alias_source());
+        }
+    }
     if let Some((_, p)) = project {
         route(p.transport.as_ref(), project_source());
     }
-    if let Some((_, a)) = &alias {
-        route(a.transport.as_ref(), alias_source());
+    if !defaulted {
+        if let Some((_, a)) = &alias {
+            route(a.transport.as_ref(), alias_source());
+        }
     }
     // A name given outright means that transport for everything, which is
     // what someone typing `--transport serial` means. It replaces the table

@@ -96,6 +96,22 @@ pub struct ProjectApp {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct UserConfig {
+    /// The board on this desk, when it is always the same one.
+    ///
+    /// A bundled name or a path, as everywhere else. The path is relative to
+    /// this file, which is the point: a user config lives in `~/.config` and
+    /// is read from wherever you happen to be standing.
+    pub board: Option<String>,
+    /// Which `[devices.<name>]` to use when nothing else says.
+    ///
+    /// An alias already bundles a board, a transport and its options -- "my
+    /// board, as I reach it" -- but is inert until something names it. This
+    /// is how it gets named without typing `--device` every time.
+    ///
+    /// A default, and treated as one: see [`resolve`](crate::resolve) for
+    /// why an alias chosen this way does not outrank a project file the way
+    /// one chosen on the command line does.
+    pub device: Option<String>,
     /// How this machine reaches a board, in whole or per capability.
     ///
     /// Which bridge a console landed on is a fact about a desk, not about a
