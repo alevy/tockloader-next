@@ -113,20 +113,22 @@ pub(crate) fn load_settings(g: &Global) -> Result<Settings, CliError> {
             // `vars_os`, not `vars`: the latter panics on any variable in the
             // environment that is not valid Unicode, including ones that have
             // nothing to do with us.
-            // No qualifier here: `TOCK_OPT_SERIAL_PORT` cannot be told from
-            // an option named `serial_port`, and `page_size` shows that keys
-            // do contain underscores. The environment therefore reaches the
-            // default route only; a file can say anything.
-            options: std::env::vars_os()
-                .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-                .filter(|(_, v)| !v.is_empty())
-                .filter_map(|(k, v)| {
-                    Some(tock_board::OptionOverride {
-                        transport: None,
-                        key: tock_board::env_option_key(&k)?,
-                        value: v,
-                    })
-                })
+            // One variable in the flag's own syntax, one option per line.
+            // It used to be `TOCK_OPT_<KEY>`, which had nowhere to put a
+            // transport: `TOCK_OPT_SERIAL_PORT` cannot be told from an
+            // option named `serial_port`, and `page_size` shows that keys do
+            // contain underscores.
+            //
+            // A line that does not parse is dropped rather than refused: a
+            // malformed variable should not stop a command that was not
+            // relying on it, and the option it meant to set will be reported
+            // missing by whichever transport wanted it.
+            options: std::env::var("TOCK_OPTS")
+                .unwrap_or_default()
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .filter_map(|line| tock_board::OptionOverride::parse(line).ok())
                 .collect(),
         },
         project: project.as_ref().map(|(o, p)| (o.clone(), p)),
