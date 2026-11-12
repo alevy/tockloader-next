@@ -64,6 +64,8 @@ pub(crate) enum Format {
 pub(crate) enum Command {
     /// Print the resolved board as a subcommand receives it, as JSON.
     Context,
+    /// List the boards this knows of, and where each one is named.
+    Boards,
     /// List the transports installed here, and the options each one reads.
     Transports,
     /// Show the resolved configuration and where each value came from.

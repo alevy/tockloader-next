@@ -1552,3 +1552,116 @@ fn a_subcommand_can_ask_tock_what_was_selected() {
     // And it says it came from the environment, because in the child it did.
     assert!(shown.contains("env TOCK_OPTS serial.port"), "{shown}");
 }
+
+// --- tock boards ---------------------------------------------------------
+
+/// Bundled names used to appear in one place: the error you get for naming
+/// a board wrong. Which is after you needed them.
+#[test]
+fn boards_lists_what_is_compiled_in() {
+    let d = Dir::new("boards_bundled");
+    let out = ok(tock(&d, &["--format", "json", "boards"]));
+    let v: Value = serde_json::from_str(&out).unwrap();
+    let names: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["reference"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"nrf52840dk"), "{names:?}");
+    assert!(names.contains(&"raspberry_pi_pico_2"), "{names:?}");
+    assert_eq!(v[0]["description"], "Nordic nRF52840 DK");
+}
+
+/// Everything the configuration in force already names, which costs
+/// nothing because resolution reads those files anyway. A board named
+/// twice is one row saying both, not two saying half each.
+#[test]
+fn boards_includes_what_the_config_names_and_marks_the_one_in_force() {
+    let d = Dir::new("boards_config");
+    std::fs::write(
+        d.path("widget.toml"),
+        "[board]\nname = \"widget-v2\"\ndescription = \"Widget v2\"\narch = \"cortex-m4\"\n\n\
+         [layout]\n\
+         flash = { start = 0x0, size = \"1M\" }\n\
+         kernel = { start = 0x0, size = \"256K\" }\n\
+         apps = { start = 0x40000, size = \"768K\" }\n",
+    )
+    .unwrap();
+    std::fs::write(d.path("Tock.toml"), "board = \"raspberry_pi_pico_2\"\n").unwrap();
+    std::fs::write(
+        d.path("cfg.toml"),
+        "[devices.lab]\nboard = \"./widget.toml\"\ntransport = \"file\"\n",
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["--format", "json", "boards"])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("cfg.toml"))
+        .env("TOCK_PROJECT", d.path("Tock.toml"))
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_str(&ok(out)).unwrap();
+    let rows = v.as_array().unwrap();
+
+    let pico = rows
+        .iter()
+        .find(|b| b["reference"] == "raspberry_pi_pico_2")
+        .unwrap();
+    // Named twice, listed once, saying both.
+    assert_eq!(pico["from"].as_array().unwrap().len(), 2, "{pico}");
+    assert_eq!(pico["from"][0], "bundled");
+    assert!(
+        pico["from"][1].as_str().unwrap().contains("project"),
+        "{pico}"
+    );
+    assert_eq!(pico["selected"], true, "the project's board is in force");
+
+    // An alias's relative path is the user config's, the same rule
+    // resolution applies, so this resolves and carries its description.
+    let widget = rows
+        .iter()
+        .find(|b| b["reference"] == "./widget.toml")
+        .unwrap();
+    assert_eq!(widget["description"], "Widget v2");
+    assert!(
+        widget["from"][0].as_str().unwrap().contains("device `lab`"),
+        "{widget}"
+    );
+    assert_eq!(widget["selected"], false);
+}
+
+/// A listing has to work when resolution does not -- "no board selected"
+/// is the commonest reason to want one. A reference that will not load says
+/// so on its own row rather than taking the command down with it.
+#[test]
+fn boards_works_when_nothing_resolves() {
+    let d = Dir::new("boards_broken");
+    std::fs::write(
+        d.path("cfg.toml"),
+        "[devices.gone]\nboard = \"./missing.toml\"\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["--format", "json", "boards"])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("cfg.toml"))
+        .env("TOCK_PROJECT", d.path("no-project.toml"))
+        .output()
+        .unwrap();
+    // No board is selected here at all; the listing is what you run to find
+    // out what to select.
+    let v: Value = serde_json::from_str(&ok(out)).unwrap();
+    let rows = v.as_array().unwrap();
+    assert!(rows.iter().all(|b| b["selected"] == false));
+    let broken = rows
+        .iter()
+        .find(|b| b["reference"] == "./missing.toml")
+        .unwrap();
+    assert!(
+        broken["error"].as_str().unwrap().contains("cannot read"),
+        "{broken}"
+    );
+    assert!(broken["description"].is_null());
+}

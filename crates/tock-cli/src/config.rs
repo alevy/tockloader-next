@@ -87,17 +87,19 @@ pub(crate) fn project_apps() -> Result<Vec<PathBuf>, CliError> {
     Ok(project.apps.iter().map(|a| dir.join(&a.tab)).collect())
 }
 
+pub(crate) fn load_user() -> Result<Option<(String, UserConfig)>, CliError> {
+    let Some(path) = user_config_path().filter(|p| p.is_file()) else {
+        return Ok(None);
+    };
+    let origin = path.display().to_string();
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| CliError::new(Code::Config, format!("{origin}: {e}")))?;
+    Ok(Some((origin.clone(), UserConfig::parse(&origin, &text)?)))
+}
+
 pub(crate) fn load_settings(g: &Global) -> Result<Settings, CliError> {
     let project = load_project()?;
-    let user = match user_config_path().filter(|p| p.is_file()) {
-        Some(p) => {
-            let origin = p.display().to_string();
-            let text = std::fs::read_to_string(&p)
-                .map_err(|e| CliError::new(Code::Config, format!("{origin}: {e}")))?;
-            Some((origin.clone(), UserConfig::parse(&origin, &text)?))
-        }
-        None => None,
-    };
+    let user = load_user()?;
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let inputs = Inputs {
         flags: Layer {
@@ -185,5 +187,125 @@ pub(crate) fn config_show(g: &Global) -> Result<(), CliError> {
     if let Some(p) = &settings.project {
         println!("project    {p}");
     }
+    Ok(())
+}
+
+/// One board the tool can name without being told where to look.
+#[derive(serde::Serialize)]
+pub(crate) struct Listed {
+    /// What to pass to `--board`.
+    pub reference: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Everywhere this board is named: bundled, a project file, an alias.
+    pub from: Vec<String>,
+    /// Whether resolution would pick this one, right here.
+    pub selected: bool,
+    /// Why it could not be read, for a reference that does not resolve.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Where it actually resolved to, which is how two names for one board
+    /// are recognised as one. Not reported: it is bookkeeping, and the
+    /// reference is what a caller would use.
+    #[serde(skip)]
+    pub resolved: Option<String>,
+}
+
+/// `tock boards`: every board this can name without being told where to
+/// look.
+///
+/// Which is not every board. A board is named by a bundled name or by a
+/// path, and there is no search path for the second -- unlike transports,
+/// which are found as `tock-transport-*` on `PATH`. So nothing can
+/// enumerate the board files on a disk, because nothing was ever told where
+/// they are. What can be listed is what is compiled in, plus whatever the
+/// configuration in force already names, which costs nothing because
+/// resolution reads those files anyway.
+pub(crate) fn boards(g: &Global) -> Result<(), CliError> {
+    // The one in force, if there is one. A listing has to work when
+    // resolution does not -- "no board selected" is the commonest reason to
+    // want it.
+    let chosen = load_settings(g).ok().map(|s| s.board_file.value);
+
+    let mut listed: Vec<Listed> = Vec::new();
+    let mut add = |reference: &str, from: String, relative_to: Option<&str>| {
+        let loaded = tock_board::BoardFile::load(reference, relative_to, &Fs);
+        // Merge by where it resolved to, so a bundled board a project also
+        // names is one row saying both, rather than two saying half each.
+        let origin = loaded.as_ref().ok().map(|(_, origin)| origin.clone());
+        if let Some(origin) = &origin {
+            if let Some(already) = listed
+                .iter_mut()
+                .find(|l| l.error.is_none() && l.resolved.as_deref() == Some(origin))
+            {
+                already.from.push(from);
+                return;
+            }
+        }
+        let (name, description, error) = match &loaded {
+            Ok((board, _)) => (
+                Some(board.info.name.clone()),
+                Some(board.info.description.clone()).filter(|d| !d.is_empty()),
+                None,
+            ),
+            Err(e) => (None, None, Some(e.to_string())),
+        };
+        listed.push(Listed {
+            reference: reference.to_string(),
+            name,
+            description,
+            selected: origin.is_some() && origin == chosen,
+            resolved: origin,
+            from: vec![from],
+            error,
+        });
+    };
+
+    for (name, _) in tock_board::BUNDLED {
+        add(name, "bundled".into(), None);
+    }
+    if let Some((origin, project)) = load_project()? {
+        if let Some(reference) = &project.board {
+            add(reference, format!("project {origin}"), Some(&origin));
+        }
+    }
+    if let Some((origin, user)) = load_user()? {
+        if let Some(reference) = &user.board {
+            add(reference, format!("user config {origin}"), Some(&origin));
+        }
+        // An alias records only its own name, so its paths are the user
+        // config's -- the same rule `resolve` applies.
+        for (alias, device) in &user.devices {
+            if let Some(reference) = &device.board {
+                add(
+                    reference,
+                    format!("device `{alias}` in user config"),
+                    Some(&origin),
+                );
+            }
+        }
+    }
+
+    if g.format == Format::Json {
+        println!("{}", serde_json::to_string(&listed).unwrap());
+        return Ok(());
+    }
+    for board in &listed {
+        let mark = if board.selected { '*' } else { ' ' };
+        match &board.error {
+            Some(why) => println!("{mark} {:<22} ({why})", board.reference),
+            None => println!(
+                "{mark} {:<22} {:<24} {}",
+                board.reference,
+                board.description.as_deref().unwrap_or(""),
+                board.from.join(", ")
+            ),
+        }
+    }
+    println!();
+    println!("A path to a board file also works, and is the only way to reach one");
+    println!("that is neither bundled nor named above: --board ./my-board.toml");
     Ok(())
 }
