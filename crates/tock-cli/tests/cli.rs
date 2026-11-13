@@ -1739,3 +1739,108 @@ fn boards_works_when_nothing_resolves() {
     );
     assert!(broken["description"].is_null());
 }
+
+// --- tock flash ----------------------------------------------------------
+
+/// Raw bytes, where they were told, with no opinion about what they are.
+/// The default address is the start of flash, which is where a kernel goes.
+#[test]
+fn flash_writes_a_binary_at_the_start_of_flash() {
+    let d = Dir::new("flash_default");
+    let image = d.erased("flash.bin");
+    let kernel: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(d.path("kernel.bin"), &kernel).unwrap();
+
+    let opt = format!("path={}", image.display());
+    let out = ok(tock(
+        &d,
+        &on_file(&opt, &["flash", d.path("kernel.bin").to_str().unwrap()]),
+    ));
+    assert!(out.contains("verified"), "{out}");
+    // nrf52840dk's flash starts at 0.
+    assert_eq!(&std::fs::read(&image).unwrap()[..4096], &kernel[..]);
+}
+
+#[test]
+fn flash_writes_at_an_address_it_is_given() {
+    let d = Dir::new("flash_address");
+    let image = d.erased("flash.bin");
+    std::fs::write(d.path("blob.bin"), vec![0xA5u8; 256]).unwrap();
+
+    let opt = format!("path={}", image.display());
+    let out = ok(tock(
+        &d,
+        &on_file(
+            &opt,
+            &[
+                "--format",
+                "json",
+                "flash",
+                "--address",
+                "0x40000",
+                d.path("blob.bin").to_str().unwrap(),
+            ],
+        ),
+    ));
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["address"], 0x40000);
+    assert_eq!(v["bytes"], 256);
+    assert_eq!(v["verified"], true);
+
+    let written = std::fs::read(&image).unwrap();
+    assert_eq!(&written[0x40000..0x40000 + 256], &[0xA5u8; 256][..]);
+    // And nowhere else.
+    assert!(written[..0x40000].iter().all(|b| *b == 0xFF));
+}
+
+/// Caught before anything is written, and said in bytes rather than left to
+/// the transport's bare refusal -- an image that does not fit is usually
+/// the wrong image or the wrong address, and the overrun says which.
+#[test]
+fn flash_refuses_an_image_that_runs_past_the_end() {
+    let d = Dir::new("flash_overrun");
+    let image = d.erased("flash.bin");
+    std::fs::write(d.path("big.bin"), vec![0x5Au8; 2048]).unwrap();
+    let before = std::fs::read(&image).unwrap();
+
+    let opt = format!("path={}", image.display());
+    let out = tock(
+        &d,
+        &on_file(
+            &opt,
+            &[
+                "flash",
+                "--address",
+                "0xFFF00",
+                d.path("big.bin").to_str().unwrap(),
+            ],
+        ),
+    );
+    assert!(!out.status.success());
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(why.contains("runs past"), "{why}");
+    assert!(why.contains("1792 bytes"), "by how much: {why}");
+    assert_eq!(
+        std::fs::read(&image).unwrap(),
+        before,
+        "nothing may be written when it will not fit"
+    );
+}
+
+#[test]
+fn flash_refuses_an_empty_image() {
+    let d = Dir::new("flash_empty");
+    let image = d.erased("flash.bin");
+    std::fs::write(d.path("nothing.bin"), b"").unwrap();
+    let opt = format!("path={}", image.display());
+    let out = tock(
+        &d,
+        &on_file(&opt, &["flash", d.path("nothing.bin").to_str().unwrap()]),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is empty"),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
