@@ -1632,6 +1632,80 @@ fn boards_includes_what_the_config_names_and_marks_the_one_in_force() {
     assert_eq!(widget["selected"], false);
 }
 
+/// A flag names a board as much as a file does. Leaving it out meant
+/// `--board ./mine.toml boards` listed everything except the one it was
+/// about, with nothing marked -- found by running it against a real board.
+#[test]
+fn boards_includes_one_named_on_the_command_line() {
+    let d = Dir::new("boards_flag");
+    std::fs::write(
+        d.path("widget.toml"),
+        "[board]\nname = \"widget-v2\"\narch = \"cortex-m4\"\n\n\
+         [layout]\n\
+         flash = { start = 0x0, size = \"1M\" }\n\
+         kernel = { start = 0x0, size = \"256K\" }\n\
+         apps = { start = 0x40000, size = \"768K\" }\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args([
+            "--board",
+            "./widget.toml",
+            "--transport",
+            "file",
+            "--format",
+            "json",
+            "boards",
+        ])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("no-user-config.toml"))
+        .env("TOCK_PROJECT", d.path("no-project.toml"))
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_str(&ok(out)).unwrap();
+    let flagged = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["reference"] == "./widget.toml")
+        .expect("the board the command is about");
+    assert_eq!(flagged["from"][0], "flag --board");
+    assert_eq!(flagged["selected"], true);
+    // No description in that file, so the name is what there is to say.
+    assert_eq!(flagged["name"], "widget-v2");
+    assert!(flagged["description"].is_null());
+}
+
+/// Resolution settles more than the board, so it can fail with the board
+/// perfectly well determined -- that file names no transport. Nothing is
+/// marked, and the listing says why rather than leaving a blank column as
+/// the only sign of it.
+#[test]
+fn boards_says_why_nothing_is_in_force() {
+    let d = Dir::new("boards_unsettled");
+    std::fs::write(
+        d.path("widget.toml"),
+        "[board]\nname = \"widget-v2\"\narch = \"cortex-m4\"\n\n\
+         [layout]\n\
+         flash = { start = 0x0, size = \"1M\" }\n\
+         kernel = { start = 0x0, size = \"256K\" }\n\
+         apps = { start = 0x40000, size = \"768K\" }\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["--board", "./widget.toml", "boards"])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("no-user-config.toml"))
+        .env("TOCK_PROJECT", d.path("no-project.toml"))
+        .output()
+        .unwrap();
+    let shown = ok(out);
+    assert!(shown.contains("./widget.toml"), "{shown}");
+    assert!(!shown.contains('*'), "nothing is in force: {shown}");
+    assert!(shown.contains("No board is in force here"), "{shown}");
+    assert!(shown.contains("no transport selected"), "{shown}");
+}
+
 /// A listing has to work when resolution does not -- "no board selected"
 /// is the commonest reason to want one. A reference that will not load says
 /// so on its own row rather than taking the command down with it.
