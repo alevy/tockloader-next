@@ -4,8 +4,14 @@
 //! one response per request, so neither end can speak unprompted, and this
 //! takes turns: ask the device what it has said, waiting briefly; send
 //! whatever has been typed; repeat. The waiting happens in the transport,
-//! where the descriptor is, so a quiet board costs one request every
-//! [`POLL_MS`] rather than a spin.
+//! where the descriptor is, so a quiet board costs one request per poll
+//! rather than a spin.
+//!
+//! "Briefly" adapts to the link rather than sitting at one fixed number. A
+//! responder returns the instant something arrives, so a longer wait never
+//! delays real output -- it only cuts down on how often this side asks into
+//! the void over a link where a round trip is not free. See
+//! [`next_timeout_ms`].
 //!
 //! The local terminal goes raw for the duration. A console is a byte stream
 //! and the device is the one deciding what a character means -- Tock's
@@ -16,15 +22,27 @@
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use clap::Parser;
 use tock_client::{CliError, connect, finish, proto};
 use tock_proto::{Capability, Request, Response};
 
-/// How long the device is given to say something before we look at the
-/// keyboard. Short enough that typing feels immediate, long enough that a
-/// silent board is not a busy loop.
+/// Where the poll starts, and the least it is ever allowed to be. A link
+/// with nothing worth measuring yet -- the very first request -- should
+/// behave exactly as it always has: short enough that typing feels
+/// immediate, long enough that a silent board on a desk is not a busy loop.
 const POLL_MS: u64 = 50;
+
+/// The most the poll is ever allowed to grow to, however bad the link.
+///
+/// The poll timeout is also the longest a keystroke can sit before the
+/// device gets a turn to receive it -- the loop reads the keyboard between
+/// requests, and a request already in flight cannot be interrupted to hand
+/// one over early. Two seconds is long past where a link merely feels slow;
+/// past it the tool reads as stuck, so growth stops there regardless of how
+/// much worse the measured round trip gets.
+const CEILING_MS: u64 = 2_000;
 
 /// Most a single read may bring back. The device is asked again immediately,
 /// so this bounds one frame rather than the conversation.
@@ -32,6 +50,21 @@ const READ_MAX: u64 = 4096;
 
 /// `^]`, as telnet has used for forty years.
 const ESCAPE: u8 = 0x1D;
+
+/// How long to wait on the next poll, given how long the round trip to the
+/// device just turned out to take.
+///
+/// Scaled rather than copied from the measurement: a single round trip is
+/// one sample, not an average, and a poll timed to match it exactly would
+/// come back early as often as late on any link with real jitter. A factor
+/// of four leaves enough room that the answer is usually already on its way
+/// back before this side would have given up and asked again -- which is
+/// the whole saving, since asking again is a request the link has to carry
+/// for nothing. Pure and separate from the loop so the curve can be checked
+/// without a device on the other end.
+fn next_timeout_ms(observed_rtt_ms: u64) -> u64 {
+    observed_rtt_ms.saturating_mul(4).clamp(POLL_MS, CEILING_MS)
+}
 
 #[derive(Parser)]
 #[command(name = "tock-console", about = "Talk to the board's console")]
@@ -66,16 +99,31 @@ fn run(args: &Args) -> Result<(), CliError> {
     // `tock console < /dev/null` is a reader, and ending its input is not a
     // reason to stop listening.
     let mut sending = true;
+    // Grows away from the floor once a round trip is seen to cost more than
+    // it; see `next_timeout_ms`.
+    let mut poll_ms = POLL_MS;
     loop {
+        let sent = Instant::now();
         let (_, said) = device
             .call(
                 Request::ConsoleRead {
                     max: READ_MAX,
-                    timeout_ms: POLL_MS,
+                    timeout_ms: poll_ms,
                 },
                 vec![],
             )
             .map_err(proto)?;
+        // A quiet board holds the request for the full timeout before
+        // answering empty, so what the call took beyond the timeout it was
+        // given is time spent carried by the link rather than waited out on
+        // purpose -- the round trip worth reacting to. A board with
+        // something to say answers before the timeout is reached at all, in
+        // which case this underestimates the round trip rather than
+        // overstating it, which is the safe direction to be wrong in.
+        // Saturating covers a clock that disagrees rather than trusting
+        // that "beyond the timeout" can never read as negative.
+        let elapsed_ms = sent.elapsed().as_millis() as u64;
+        poll_ms = next_timeout_ms(elapsed_ms.saturating_sub(poll_ms));
         if !said.is_empty() {
             out.write_all(&said)
                 .and_then(|()| out.flush())
@@ -164,5 +212,32 @@ impl Drop for Raw {
         // The device left the cursor wherever it liked.
         let _ = std::io::stdout().write_all(b"\r\n");
         let _ = std::io::stdout().flush();
+    }
+}
+
+#[cfg(test)]
+mod console_tests {
+    use super::*;
+
+    #[test]
+    fn a_fast_link_keeps_the_short_poll() {
+        // A round trip of a millisecond is a desk, not a wire. The poll
+        // should stay at the floor rather than drift upward on noise.
+        assert_eq!(next_timeout_ms(1), 50);
+    }
+
+    #[test]
+    fn a_slow_link_lengthens_the_poll() {
+        // Once the round trip itself is three times the floor, holding the
+        // poll at the floor would mean asking again before the previous ask
+        // could possibly have come back.
+        assert!(next_timeout_ms(150) > 50);
+    }
+
+    #[test]
+    fn the_timeout_is_bounded() {
+        // However bad the link, the poll stops growing at the ceiling
+        // documented on `CEILING_MS`.
+        assert!(next_timeout_ms(100_000) <= CEILING_MS);
     }
 }
