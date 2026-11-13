@@ -11,11 +11,11 @@ crates/tock-proto  draft device protocol and framing
 crates/tock-cli    the `tock` binary, the subcommands and transports we ship
 ```
 
-`tock-cli` builds eight binaries: `tock` itself, the `tock-install`,
-`tock-uninstall`, `tock-list` and `tock-console` subcommands, and the
-`tock-transport-file`, `tock-transport-openocd` and `tock-transport-serial`
-transports. They share a crate because we ship
-them together, not because anything in the architecture joins them -- each is
+`tock-cli` builds nine binaries: `tock` itself, the `tock-install`,
+`tock-uninstall`, `tock-list`, `tock-console` and `tock-flash` subcommands,
+and the `tock-transport-file`, `tock-transport-openocd` and
+`tock-transport-serial` transports. They share a crate because we ship them
+together, not because anything in the architecture joins them -- each is
 reached exactly the way a third party's would be.
 
 ## Where to start reading
@@ -73,6 +73,16 @@ $T --board nrf52840dk --transport file --opt path=flash.bin --opt create=true in
 $T --board nrf52840dk --transport file --opt path=flash.bin list
 $T --board nrf52840dk --transport file --opt path=flash.bin --format json install --dry-run blink.tab
 $T --board nrf52840dk --transport file --opt path=flash.bin config show
+```
+
+`tock flash` is the one that does not go through any of that: it writes a
+raw binary -- a kernel, usually -- to an address, defaulting to the start of
+the board's flash. No format and no placement, which is the point of having
+it separately from `install`.
+
+```sh
+head -c 4096 /dev/urandom > kernel.bin
+$T --board nrf52840dk --transport file --opt path=flash.bin flash kernel.bin
 ```
 
 Global flags go before the subcommand. `--format` belongs to `tock`, and

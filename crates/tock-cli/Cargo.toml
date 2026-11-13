@@ -27,6 +27,10 @@ name = "tock-console"
 path = "clients/console.rs"
 
 [[bin]]
+name = "tock-flash"
+path = "clients/flash.rs"
+
+[[bin]]
 name = "tock-transport-file"
 path = "transports/file.rs"
 
