@@ -1,5 +1,37 @@
 # tockloader-next
 
+## Install
+
+With nix, no Rust toolchain needed:
+
+```sh
+nix run github:alevy/tockloader-next -- boards   # once, without installing
+nix profile install github:alevy/tockloader-next
+```
+
+Without flakes, `nix-build` and `nix-env -i -f .` work from a checkout; that
+door takes nixpkgs from your channel rather than the pinned one.
+
+All nine binaries land in one directory, which is all `tock` needs: it looks
+for `tock-<name>` beside its own executable before it looks at `PATH`, so
+subcommands and transports are found with no wrapper and nothing to put on
+`PATH` by hand.
+
+`openocd` is deliberately not in the closure -- reaching a board over the
+file or serial transport should not pull in a debug server, and anyone doing
+JTAG work has an openocd already. If you would rather have one bundled:
+
+```sh
+nix profile install github:alevy/tockloader-next#with-openocd
+```
+
+Either way `--opt openocd.command=/path/to/openocd` names a specific one.
+
+For hacking on it, `nix develop` gives the same rustc and cargo the package
+builds with, plus clippy, rustfmt, rust-analyzer and openocd.
+
+Otherwise: `cargo build`, and the binaries are in `target/debug`.
+
 ## Layout
 
 ```
@@ -9,6 +41,7 @@ crates/tock-image  pure planner: discover / plan / render (no I/O)
 crates/tock-board  board, project and user config, and resolution with provenance (no I/O)
 crates/tock-proto  draft device protocol and framing
 crates/tock-cli    the `tock` binary, the subcommands and transports we ship
+package.nix        the build; default.nix and flake.nix are two doors onto it
 ```
 
 `tock-cli` builds nine binaries: `tock` itself, the `tock-install`,

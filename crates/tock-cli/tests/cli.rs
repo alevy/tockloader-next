@@ -779,6 +779,24 @@ fn a_transport_that_cannot_start_still_says_how_to_fix_it() {
     assert!(err.contains("try: install openocd"), "{err}");
 }
 
+/// The python3 to run the stand-in subcommand with, as an absolute path.
+///
+/// `#!/usr/bin/env python3` is the normal thing to write, but `/usr/bin/env`
+/// is itself a host assumption -- it does not exist in a Nix build sandbox,
+/// where the interpreter is on `PATH` and almost nothing else is there at
+/// all. Resolving it here leaves the test with one assumption (there is a
+/// python3) instead of two, and turns a missing interpreter from a bare
+/// `No such file or directory` on the wrong path into something that says
+/// what is missing.
+fn python3() -> PathBuf {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .map(|dir| dir.join("python3"))
+        .find(|p| p.is_file())
+        .expect("this test needs a python3 on PATH")
+}
+
 #[test]
 fn a_subcommand_is_handed_a_connection_on_fd_3() {
     // Written in Python on purpose: a subcommand should need nothing of ours
@@ -794,7 +812,8 @@ fn a_subcommand_is_handed_a_connection_on_fd_3() {
     std::fs::create_dir_all(d.path("bin")).unwrap();
     std::fs::write(
         d.path("bin/tock-fdtest"),
-        r#"#!/usr/bin/env python3
+        format!(
+            r#"#!{}
 import os, json, struct
 f = os.fdopen(3, 'r+b', buffering=0)
 def call(msg):
@@ -803,11 +822,13 @@ def call(msg):
     resp = json.loads(f.read(struct.unpack('<I', f.read(4))[0]))
     f.read(struct.unpack('<I', f.read(4))[0])
     return resp
-hello = call({"op": "hello", "protocol": 0, "client": "fdtest", "needs": ["memory_read"]})
+hello = call({{"op": "hello", "protocol": 0, "client": "fdtest", "needs": ["memory_read"]}})
 print("caps:", ",".join(sorted(hello["capabilities"])))
-data = call({"op": "read", "address": 262144, "len": 8})
+data = call({{"op": "read", "address": 262144, "len": 8}})
 print("read:", data["result"])
 "#,
+            python3().display()
+        ),
     )
     .unwrap();
     let mut perms = std::fs::metadata(d.path("bin/tock-fdtest"))
