@@ -31,6 +31,11 @@
 //!    is not a head start -- it is a design decision taken in advance of the
 //!    thing that would have informed it, which is how `apps_install` came to
 //!    assume one TBF at a time before any app-speaking transport existed.
+//!
+//!    One response per request, with one exception: between
+//!    [`Request::ConsoleAttach`] and [`Request::ConsoleDetach`] the
+//!    responder may send [`Response::Console`] frames unprompted. The first
+//!    frame that is not one is the answer to the outstanding request.
 //! 4. [`Request::Close`] -- the responder **releases the device** and stops.
 //!    Releasing it means leaving it able to run: a transport that stopped a
 //!    core to do its work has to start it again, and one that changed flash
@@ -51,6 +56,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -99,22 +105,30 @@ pub enum Request {
     Write {
         address: u64,
     },
-    /// Read whatever the device has said, waiting up to `timeout_ms` for
-    /// something to arrive. An empty payload means it stayed quiet, which is
-    /// an answer and not a failure. Payload in the response.
-    ///
-    /// Polled rather than pushed because the carrier is strictly
-    /// synchronous: one response per request, so a responder can never speak
-    /// unprompted. Blocking in the responder for a short while is what keeps
-    /// that from becoming a busy loop -- the waiting happens where the file
-    /// descriptor is, and the caller is free in between to send what the
-    /// user has typed.
-    ConsoleRead {
-        max: u64,
-        timeout_ms: u64,
-    },
     /// Payload: bytes to send to the device, as if typed at it.
     ConsoleWrite,
+    /// The responder may send console bytes unprompted until `ConsoleDetach`.
+    ///
+    /// Answered `Ok` by a responder that advertises
+    /// [`Capability::Console`]. From that answer until the one to
+    /// `ConsoleDetach`:
+    ///
+    /// * A reader must expect a push at any point. The first frame that is
+    ///   not a [`Response::Console`] is the answer to the outstanding
+    ///   request -- including the answers to `ConsoleAttach` and
+    ///   `ConsoleDetach` themselves.
+    /// * A second `ConsoleAttach` while attached is an error, not a no-op.
+    /// * Detach is ordered by its answer: pushes already in flight must
+    ///   still be delivered, and none may follow the answer to the detach.
+    /// * `Close` implies detach; a caller need not detach first.
+    /// * A push is written synchronously, so a consumer that cannot keep up
+    ///   blocks the responder. There is no queue and no dropping.
+    ///
+    /// Input stays a request: a keystroke travels as `ConsoleWrite` and is
+    /// acknowledged. Only the device's output is pushed.
+    ConsoleAttach,
+    /// Stop. The responder sends no further console bytes after answering.
+    ConsoleDetach,
     Reset,
     Vendor {
         name: String,
@@ -137,6 +151,9 @@ pub enum Response {
     Ok,
     /// Payload carries the data.
     Data,
+    /// Console bytes, sent unprompted while attached. Payload carries them.
+    /// See [`Request::ConsoleAttach`].
+    Console,
     Vendor {
         value: serde_json::Value,
     },
@@ -249,10 +266,11 @@ pub enum Capability {
     /// is the transport's job to preserve the rest.
     MemoryWrite,
     Reset,
-    /// `console_read` and `console_write`: a byte stream to and from the
-    /// running device. Not every transport that can reach a board's flash
-    /// can reach its console, and the reverse holds too -- a USB-to-UART
-    /// bridge is a console and nothing else.
+    /// A byte stream to and from the running device: input travels as
+    /// `console_write`, output arrives as [`Response::Console`] while
+    /// attached. Not every transport that can reach a board's flash can
+    /// reach its console, and the reverse holds too -- a USB-to-UART bridge
+    /// is a console and nothing else.
     Console,
     /// Namespaced vendor operations, passed through untouched.
     Vendor(String),
@@ -378,6 +396,12 @@ pub trait Connection {
         request: Request,
         payload: Vec<u8>,
     ) -> Result<(Response, Vec<u8>), ProtoError>;
+
+    /// Where this responder's unsolicited console bytes go, once attached.
+    ///
+    /// [`serve_streaming`] calls it exactly once, before its loop starts;
+    /// [`serve`] never calls it.
+    fn set_console_sink(&mut self, _sink: ConsoleSink) {}
 }
 
 /// So a boxed connection is still a connection, and decorators can be
@@ -389,6 +413,26 @@ impl Connection for Box<dyn Connection> {
         payload: Vec<u8>,
     ) -> Result<(Response, Vec<u8>), ProtoError> {
         (**self).call(request, payload)
+    }
+
+    fn set_console_sink(&mut self, sink: ConsoleSink) {
+        (**self).set_console_sink(sink)
+    }
+}
+
+/// A responder's handle for pushing console bytes onto its connection from
+/// another thread.
+///
+/// `push` holds the shared writer's lock for one frame only, so a response
+/// from the serve loop can land between two pushes.
+#[derive(Clone)]
+pub struct ConsoleSink(Arc<Mutex<dyn Write + Send>>);
+
+impl ConsoleSink {
+    /// Write `bytes` to the peer as one [`Response::Console`] frame.
+    pub fn push(&self, bytes: &[u8]) -> Result<(), ProtoError> {
+        let mut writer = self.0.lock().expect("console sink writer poisoned");
+        write_frame(&mut *writer, &Response::Console, bytes)
     }
 }
 
@@ -554,6 +598,10 @@ impl Connection for Traced {
             Err(e) => eprintln!("{peer} <- error: {e}"),
         }
         answer
+    }
+
+    fn set_console_sink(&mut self, sink: ConsoleSink) {
+        self.inner.set_console_sink(sink)
     }
 }
 
@@ -722,21 +770,54 @@ fn collapse(
 /// any suggestion, and decides what the user's command exits with. Returning
 /// an error here as well would only print the same sentence twice.
 pub fn serve<R: Read, W: Write, C: Connection>(
-    mut reader: R,
+    reader: R,
     mut writer: W,
     connection: &mut C,
+) -> Result<(), ProtoError> {
+    serve_loop(reader, connection, |response, out| {
+        write_frame(&mut writer, response, out)
+    })
+}
+
+/// [`serve`], for a responder that also pushes console bytes.
+///
+/// The writer is shared with a [`ConsoleSink`] handed to `connection` once,
+/// before the loop starts, so a thread reading the device can push while
+/// this loop is between requests.
+///
+/// `W: Send + 'static` because the sink may outlive this call, on a thread
+/// `connection` spawned.
+pub fn serve_streaming<R: Read, W: Write + Send + 'static, C: Connection>(
+    reader: R,
+    writer: W,
+    connection: &mut C,
+) -> Result<(), ProtoError> {
+    let writer: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(writer));
+    connection.set_console_sink(ConsoleSink(writer.clone()));
+    serve_loop(reader, connection, |response, out| {
+        let mut writer = writer.lock().expect("console sink writer poisoned");
+        write_frame(&mut *writer, response, out)
+    })
+}
+
+/// The loop shared by [`serve`] and [`serve_streaming`]. `write` puts a
+/// response frame on the wire.
+fn serve_loop<R: Read, C: Connection>(
+    mut reader: R,
+    connection: &mut C,
+    mut write: impl FnMut(&Response, &[u8]) -> Result<(), ProtoError>,
 ) -> Result<(), ProtoError> {
     while let Some((request, payload)) = read_frame::<_, Request>(&mut reader)? {
         let close = request == Request::Close;
         match connection.call(request, payload) {
             Ok((response, out)) => {
-                write_frame(&mut writer, &response, &out)?;
+                write(&response, &out)?;
                 if close {
                     break;
                 }
             }
             Err(e) => {
-                write_frame(&mut writer, &Response::from(e), &[])?;
+                write(&Response::from(e), &[])?;
                 return Ok(());
             }
         }
@@ -745,7 +826,7 @@ pub fn serve<R: Read, W: Write, C: Connection>(
 }
 
 /// One frame out. See [`StreamChannel`] for the layout.
-fn write_frame<W: Write, T: Serialize>(
+pub fn write_frame<W: Write + ?Sized, T: Serialize>(
     w: &mut W,
     message: &T,
     payload: &[u8],
@@ -761,7 +842,7 @@ fn write_frame<W: Write, T: Serialize>(
 
 /// One frame in, or `Ok(None)` at a clean end of stream. See
 /// [`StreamChannel`] for the layout.
-fn read_frame<R: Read, T: for<'de> Deserialize<'de>>(
+pub fn read_frame<R: Read, T: for<'de> Deserialize<'de>>(
     r: &mut R,
 ) -> Result<Option<(T, Vec<u8>)>, ProtoError> {
     let mut len = [0u8; 4];

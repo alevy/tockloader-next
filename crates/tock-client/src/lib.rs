@@ -22,10 +22,12 @@
 //! The protocol itself is [`tock_proto`]; this crate is the part that would
 //! otherwise be copied into every subcommand.
 
+mod attached;
 mod error;
 
+use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use tock_board::Context;
 
@@ -33,6 +35,7 @@ use tock_proto::{
     Capability, Client, Connection, ErrorKind, ProtoError, Request, Response, StreamChannel,
 };
 
+pub use attached::{Pumped, Sink, pumped};
 pub use error::{CliError, Code};
 
 /// The connection `tock` handed us, or one we start for ourselves.
@@ -51,6 +54,18 @@ pub fn connect(needs: &[Capability]) -> Result<Client, CliError> {
     Client::open(raw_connection()?, &whoami(), needs).map_err(proto)
 }
 
+/// Like [`connect`], but with the reader on a pump: every
+/// [`tock_proto::Response::Console`] goes to `sink`, and anything else
+/// answers a [`Connection::call`].
+pub fn connect_pumped(needs: &[Capability], sink: Sink) -> Result<Client, CliError> {
+    let (reader, writer, child) = raw_halves()?;
+    let mut connection = pumped(reader, writer, sink);
+    if let Some(child) = child {
+        connection = connection.owning(child);
+    }
+    Client::open(Box::new(connection), &whoami(), needs).map_err(proto)
+}
+
 /// How we introduce ourselves in `Hello`: the program running, since that is
 /// what a trace of the conversation needs to name.
 fn whoami() -> String {
@@ -61,8 +76,13 @@ fn whoami() -> String {
     format!("{name} {}", env!("CARGO_PKG_VERSION"))
 }
 
-/// The carrier itself, for the rare caller that wants it unopened.
-fn raw_connection() -> Result<Box<dyn Connection>, CliError> {
+/// The reader, writer, and (if we spawned it ourselves) the child those
+/// belong to.
+type RawHalves = (Box<dyn Read + Send>, Box<dyn Write>, Option<Child>);
+
+/// Where a connection's bytes come from: `TOCK_CONNECTION` if `tock` handed
+/// us one, otherwise a `tock broker` we start ourselves.
+fn raw_halves() -> Result<RawHalves, CliError> {
     if let Some(fd) = std::env::var("TOCK_CONNECTION")
         .ok()
         .and_then(|v| v.parse::<i32>().ok())
@@ -73,10 +93,7 @@ fn raw_connection() -> Result<Box<dyn Connection>, CliError> {
         let reader = handed
             .try_clone()
             .map_err(|e| CliError::new(Code::Device, format!("TOCK_CONNECTION={fd}: {e}")))?;
-        return Ok(Box::new(StreamChannel {
-            reader,
-            writer: handed,
-        }));
+        return Ok((Box::new(reader), Box::new(handed), None));
     }
     let mut child = Command::new("tock")
         .arg("broker")
@@ -89,7 +106,16 @@ fn raw_connection() -> Result<Box<dyn Connection>, CliError> {
         })?;
     let reader = child.stdout.take().expect("piped");
     let writer = child.stdin.take().expect("piped");
-    Ok(Box::new(Spawned::new(reader, writer, child)))
+    Ok((Box::new(reader), Box::new(writer), Some(child)))
+}
+
+/// The carrier itself, for the rare caller that wants it unopened.
+fn raw_connection() -> Result<Box<dyn Connection>, CliError> {
+    let (reader, writer, child) = raw_halves()?;
+    Ok(match child {
+        None => Box::new(StreamChannel { reader, writer }),
+        Some(child) => Box::new(Spawned::new(reader, writer, child)),
+    })
 }
 
 /// A [`Connection`] to a process we started, reaped when the connection goes.

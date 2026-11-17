@@ -2,23 +2,24 @@
 //! `tock-transport-<name>` executable and memory operations on top of the
 //! protocol. The core has no transports of its own.
 
+use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use tock_board::Settings;
 use tock_proto::{Client, Connection, FlashInfo, Request, Response, Traced};
 
 use tock_client::{CliError, Code, Spawned, proto};
 
-/// Open the transport named in the context. Every transport is an executable
-/// `tock-transport-<name>`, found next to `tock` or on `PATH` -- including the
-/// `file` transport, which ships alongside `tock` but is not special.
-pub fn open_connection(
-    settings: &Settings,
-    name: &str,
-    trace: bool,
-) -> Result<Box<dyn Connection>, CliError> {
-    let _ = settings;
+/// What starting a transport gives: the two halves of a connection to it,
+/// and the process they belong to.
+pub type Started = (Box<dyn Read + Send>, Box<dyn Write>, Child);
+
+/// Start `tock-transport-<name>` and hand back its stdio. Every transport is
+/// an executable `tock-transport-<name>`, found next to `tock` or on `PATH`
+/// -- including the `file` transport, which ships alongside `tock` but is
+/// not special.
+pub fn spawn_transport(name: &str) -> Result<Started, CliError> {
     let exe = format!("tock-transport-{name}");
     let path = crate::external::find_executable(&exe).ok_or_else(|| {
         CliError::new(
@@ -43,24 +44,31 @@ pub fn open_connection(
         })?;
     let reader = child.stdout.take().expect("piped");
     let writer = child.stdin.take().expect("piped");
-    let spawned = Spawned::new(reader, writer, child);
-    Ok(if trace {
-        Box::new(Traced {
-            peer: "transport",
-            inner: Box::new(spawned),
-        })
-    } else {
-        Box::new(spawned)
-    })
+    Ok((Box::new(reader), Box::new(writer), child))
 }
 
-/// Spawn the transport the context names, greet it, and open it.
+/// Show what we ask a device, when `--trace-protocol` is on.
+pub fn traced(connection: Box<dyn Connection>, trace: bool) -> Box<dyn Connection> {
+    match trace {
+        true => Box::new(Traced {
+            peer: "transport",
+            inner: connection,
+        }),
+        false => connection,
+    }
+}
+
+/// Greet the transport `connection` reaches, check what it declared, and
+/// `Open` it.
 ///
 /// The result is an ordinary [`Client`] -- the same thing a subcommand gets
 /// from the connection it inherits. The difference is only that we started
 /// the transport and it did not.
-pub fn open(settings: &Settings, name: &str, trace: bool) -> Result<Client, CliError> {
-    let connection = open_connection(settings, name, trace)?;
+pub fn open(
+    connection: Box<dyn Connection>,
+    settings: &Settings,
+    name: &str,
+) -> Result<Client, CliError> {
     let layout = &settings.board.layout;
     let flash = FlashInfo {
         start: layout.flash.start.0,

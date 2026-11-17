@@ -4,23 +4,27 @@
 //! with a USB-to-UART bridge soldered on, the bridge is a console and nothing
 //! else -- it appears as its own USB device, with no path to flash at all,
 //! while the debug adapter next to it has no path to the console. So this
-//! transport declares [`Capability::Console`] and nothing more, and a command
-//! that wants the console asks for it by name: `tock --transport serial
-//! console`.
+//! transport declares [`Capability::Console`] and nothing more, and a
+//! command that wants the console asks for it by name:
+//! `tock --transport serial console`.
 //!
 //! The port is a fact about a desk, not about a board: which `/dev/tty*` a
 //! bridge landed on depends on what else is plugged in and in what order. It
 //! belongs in a user config. The baud rate is the board's, and belongs in a
 //! board file.
 //!
-//! Reads are polled, because the protocol is strictly synchronous and a
-//! responder can never speak unprompted. The waiting is done here, where the
-//! descriptor is, so a caller asking for a short wait gets a quiet answer
-//! rather than a spin.
+//! Output is pushed: a `ConsoleAttach` puts the port's reads on a thread of
+//! their own ([`device_loop`]) that writes [`ConsoleSink`] pushes until a
+//! `ConsoleDetach` stops it.
 
 use std::os::fd::{AsRawFd, RawFd};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 
-use tock_proto::{Capability, Connection, ErrorKind, OptionSpec, Options, Request, Response};
+use tock_proto::{
+    Capability, Connection, ConsoleSink, ErrorKind, OptionSpec, Options, Request, Response,
+};
 
 /// Baud when a board file does not say. What Tock's console uses.
 const DEFAULT_BAUD: u64 = 115_200;
@@ -38,6 +42,12 @@ const DEFAULT_BAUD: u64 = 115_200;
 /// typing, and 5ms a byte is 200 a second -- far faster than anyone types,
 /// and a pasted command of forty characters lands in a fifth of a second.
 const DEFAULT_PACE_MS: u64 = 5;
+
+/// How often the device thread rechecks its stop flag while attached.
+///
+/// This timeout trades off how long a `detach` waits to join that thread
+/// against how often an idle port wakes it for nothing.
+const ATTACHED_POLL_MS: u64 = 100;
 
 /// Every option this transport reads.
 fn options() -> Vec<OptionSpec> {
@@ -75,10 +85,21 @@ fn baud_constant(baud: u64) -> Option<libc::speed_t> {
     })
 }
 
+/// What `ConsoleAttach` spawned, and how to stop it.
+struct Attached {
+    stop: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
 #[derive(Default)]
 pub struct SerialTransport {
     port: Option<std::fs::File>,
     pace: std::time::Duration,
+    /// Where to push console bytes, once
+    /// [`serve_streaming`](tock_proto::serve_streaming) hands one over.
+    console_sink: Option<ConsoleSink>,
+    /// The device thread, while one is running.
+    attached: Option<Attached>,
 }
 
 impl SerialTransport {
@@ -131,6 +152,10 @@ impl SerialTransport {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(DEFAULT_PACE_MS),
         );
+        // A prior `ConsoleAttach`'s thread reads a clone of the old port, so
+        // it has to stop before the port is replaced -- and only now the new
+        // one is ready, so a failed re-`Open` never tears down a live one.
+        let _ = self.detach();
         self.port = Some(file);
         Response::Ok
     }
@@ -139,28 +164,6 @@ impl SerialTransport {
         self.port
             .as_mut()
             .ok_or_else(|| Response::error(ErrorKind::InvalidRequest, "not open"))
-    }
-
-    /// Whatever has arrived within `timeout_ms`. Empty is a normal answer.
-    fn read(&mut self, max: u64, timeout_ms: u64) -> Result<Vec<u8>, Response> {
-        use std::io::Read as _;
-        let port = self.port()?;
-        let fd = port.as_raw_fd();
-        if !wait_readable(fd, timeout_ms) {
-            return Ok(Vec::new());
-        }
-        // Capped so one request cannot be answered with an unbounded frame;
-        // the caller asks again, which it was going to do anyway.
-        let mut buffer = vec![0u8; max.min(64 * 1024) as usize];
-        match port.read(&mut buffer) {
-            Ok(n) => {
-                buffer.truncate(n);
-                Ok(buffer)
-            }
-            // The port said nothing after all, which the wait allows.
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Vec::new()),
-            Err(e) => Err(Response::error(ErrorKind::Device, e.to_string())),
-        }
     }
 
     /// Send bytes, one at a time, with [`DEFAULT_PACE_MS`] between them.
@@ -188,6 +191,51 @@ impl SerialTransport {
             port.write_all(&[*byte])
                 .and_then(|()| port.flush())
                 .map_err(device)?;
+        }
+        Ok(())
+    }
+
+    /// Start pushing whatever the port says, until [`Self::detach`].
+    ///
+    /// Reads a [`try_clone`](std::fs::File::try_clone) of the port, not a
+    /// second `open()`: opening again runs [`configure`], whose `tcflush`
+    /// would discard what the board said before anyone attached.
+    fn attach(&mut self) -> Result<(), Response> {
+        if self.attached.is_some() {
+            return Err(Response::error(
+                ErrorKind::InvalidRequest,
+                "the console is already attached",
+            ));
+        }
+        let Some(sink) = self.console_sink.clone() else {
+            // Only reachable on a connection not served by `serve_streaming`.
+            return Err(Response::error(
+                ErrorKind::InvalidRequest,
+                "console streaming is not available on this connection",
+            ));
+        };
+        let reader = self
+            .port()?
+            .try_clone()
+            .map_err(|e| Response::error(ErrorKind::Device, e.to_string()))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = std::thread::spawn({
+            let stop = stop.clone();
+            move || device_loop(reader, sink, stop)
+        });
+        self.attached = Some(Attached { stop, handle });
+        Ok(())
+    }
+
+    /// Stop pushing, and wait for the device thread to actually stop before
+    /// returning, so no push can follow the `Ok`.
+    ///
+    /// Detaching when nothing is attached is not an error.
+    fn detach(&mut self) -> Result<(), Response> {
+        if let Some(attached) = self.attached.take() {
+            attached.stop.store(true, Ordering::Relaxed);
+            // A panicked device thread has already stopped pushing.
+            let _ = attached.handle.join();
         }
         Ok(())
     }
@@ -230,6 +278,9 @@ fn configure(fd: RawFd, speed: libc::speed_t) -> std::io::Result<()> {
 }
 
 /// Whether the descriptor has something to read within `timeout_ms`.
+///
+/// `POLLIN` only: a tty hangup sets it too, so the read that follows
+/// returns `Ok(0)` and [`device_loop`] ends on it.
 fn wait_readable(fd: RawFd, timeout_ms: u64) -> bool {
     let mut poll = libc::pollfd {
         fd,
@@ -239,6 +290,30 @@ fn wait_readable(fd: RawFd, timeout_ms: u64) -> bool {
     // SAFETY: one descriptor we own, and a timeout that fits an int.
     let ready = unsafe { libc::poll(&mut poll, 1, timeout_ms.min(i32::MAX as u64) as i32) };
     ready > 0 && poll.revents & libc::POLLIN != 0
+}
+
+/// What `attach` spawns: push whatever `port` says until `stop` is set.
+fn device_loop(mut port: std::fs::File, sink: ConsoleSink, stop: Arc<AtomicBool>) {
+    use std::io::Read as _;
+    let fd = port.as_raw_fd();
+    let mut buffer = [0u8; 4096];
+    while !stop.load(Ordering::Relaxed) {
+        if !wait_readable(fd, ATTACHED_POLL_MS) {
+            continue;
+        }
+        match port.read(&mut buffer) {
+            // The port itself is gone: nothing more will ever arrive.
+            Ok(0) => break,
+            Ok(n) => {
+                // The peer is gone; nothing left to push to.
+                if sink.push(&buffer[..n]).is_err() {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(_) => break,
+        }
+    }
 }
 
 impl Connection for SerialTransport {
@@ -266,11 +341,13 @@ impl Connection for SerialTransport {
                 option_bases,
                 ..
             } => Ok((self.open(Options::new(&options, &option_bases)), vec![])),
-            Request::ConsoleRead { max, timeout_ms } => self
-                .read(max, timeout_ms)
-                .map(|data| (Response::Data, data)),
             Request::ConsoleWrite => self.write(&payload).map(|()| (Response::Ok, vec![])),
+            Request::ConsoleAttach => self.attach().map(|()| (Response::Ok, vec![])),
+            Request::ConsoleDetach => self.detach().map(|()| (Response::Ok, vec![])),
             Request::Close => {
+                // Closing detaches too: the device thread holds its own
+                // clone of the descriptor and would outlive the port.
+                let _ = self.detach();
                 self.port = None;
                 Ok((Response::Ok, vec![]))
             }
@@ -281,13 +358,18 @@ impl Connection for SerialTransport {
         };
         Ok(answer.unwrap_or_else(|e| (e, vec![])))
     }
+
+    fn set_console_sink(&mut self, sink: ConsoleSink) {
+        self.console_sink = Some(sink);
+    }
 }
 
 fn main() {
     let mut transport = SerialTransport::default();
     let stdin = std::io::stdin().lock();
-    let stdout = std::io::stdout().lock();
-    if let Err(e) = tock_proto::serve(stdin, stdout, &mut transport) {
+    // Not `.lock()`: `serve_streaming` keeps the writer past this call, so
+    // it must be `'static`, which `StdoutLock` is not.
+    if let Err(e) = tock_proto::serve_streaming(stdin, std::io::stdout(), &mut transport) {
         eprintln!("tock-transport-serial: {e}");
         std::process::exit(1);
     }

@@ -280,3 +280,101 @@ fn a_hello_without_options_still_parses() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn the_stream_messages_have_the_names_the_spec_fixes() {
+    assert_eq!(
+        serde_json::to_string(&Request::ConsoleAttach).unwrap(),
+        "{\"op\":\"console_attach\"}"
+    );
+    assert_eq!(
+        serde_json::to_string(&Request::ConsoleDetach).unwrap(),
+        "{\"op\":\"console_detach\"}"
+    );
+    assert_eq!(
+        serde_json::to_string(&Response::Console).unwrap(),
+        "{\"result\":\"console\"}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ConsoleSink and serve_streaming
+
+/// A `Write` that shares its bytes through an `Arc<Mutex<_>>` so a test can
+/// read them back after `serve_streaming` has taken the writer by value.
+#[derive(Clone)]
+struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedBuf {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(data);
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Pushes two console frames the moment it is given a sink, then answers
+/// whatever it is asked with `Ok`.
+struct PushesTwiceThenAnswers;
+impl Connection for PushesTwiceThenAnswers {
+    fn call(
+        &mut self,
+        _request: Request,
+        _payload: Vec<u8>,
+    ) -> Result<(Response, Vec<u8>), ProtoError> {
+        Ok((Response::Ok, vec![]))
+    }
+    fn set_console_sink(&mut self, sink: ConsoleSink) {
+        sink.push(b"one").unwrap();
+        sink.push(b"two").unwrap();
+    }
+}
+
+#[test]
+fn a_pushed_frame_reaches_the_writer_before_the_response() {
+    let mut asked = Vec::new();
+    write_frame(&mut asked, &Request::Reset, &[]).unwrap();
+
+    let said = Arc::new(Mutex::new(Vec::new()));
+    serve_streaming(
+        &asked[..],
+        SharedBuf(said.clone()),
+        &mut PushesTwiceThenAnswers,
+    )
+    .unwrap();
+
+    let said = said.lock().unwrap().clone();
+    assert_eq!(
+        frames(&said),
+        vec![Response::Console, Response::Console, Response::Ok],
+        "the two pushes made while attaching must precede the answer, in order"
+    );
+}
+
+#[test]
+fn console_payload_is_byte_identical() {
+    // A newline, four bytes that look exactly like a little-endian length
+    // prefix, and then more bytes than that prefix would claim.
+    let awkward: Vec<u8> = vec![0x0a, 0x00, 0x00, 0x00, 0x04, 0xff, 0x0d, 0x0a];
+
+    let said = Arc::new(Mutex::new(Vec::new()));
+    let writer: Arc<Mutex<dyn Write + Send>> = said.clone();
+    let sink = ConsoleSink(writer);
+
+    sink.push(&awkward).unwrap();
+
+    let said = said.lock().unwrap().clone();
+    let mut rest = &said[..];
+    let (response, payload): (Response, Vec<u8>) = read_frame(&mut rest).unwrap().unwrap();
+    assert_eq!(response, Response::Console);
+    assert_eq!(
+        payload, awkward,
+        "the bytes must survive exactly, unmangled"
+    );
+    assert!(
+        read_frame::<_, Response>(&mut rest).unwrap().is_none(),
+        "one push must produce exactly one frame, not more"
+    );
+}

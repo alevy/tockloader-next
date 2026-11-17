@@ -175,7 +175,7 @@ pub(crate) fn external(g: &Global, args: Vec<String>) -> Result<(), CliError> {
             .map_err(|e| CliError::new(Code::Failed, format!("{exe}: {e}")))?;
         let mut broker =
             crate::broker::watched(Broker::new(settings, g.trace_protocol), g.trace_protocol);
-        let _ = tock_proto::serve(reader, ours, &mut broker);
+        let _ = tock_proto::serve_streaming(reader, ours, &mut broker);
     }
 
     let status = child
