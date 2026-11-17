@@ -7,6 +7,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 
 use serde_json::Value;
 use tock_image::Region;
@@ -1204,6 +1205,17 @@ fn transports_lists_what_each_one_reads() {
 
 // --- console -------------------------------------------------------------
 
+/// Whether `fd` has something to read within `timeout_ms`.
+fn readable_within(fd: std::os::fd::RawFd, timeout_ms: i32) -> bool {
+    let mut poll = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one descriptor the caller holds open across this call.
+    unsafe { libc::poll(&mut poll, 1, timeout_ms) > 0 }
+}
+
 /// A pseudo-terminal pair, which is a serial port for every purpose this
 /// transport has: `termios` applies, `poll` works, and bytes written to one
 /// end arrive at the other. It stands in for a board without needing one.
@@ -1242,6 +1254,21 @@ fn pty() -> (std::fs::File, std::fs::File, PathBuf) {
     }
 }
 
+/// Drain `pipe` on a worker, and hand back what it carried once it closes.
+///
+/// A pipe handed to a child is held open by everything that inherited it, so
+/// reading one to end of file can wait on processes this test cannot reap.
+/// On a worker, a `recv_timeout` can give up on that.
+fn drained(mut pipe: impl std::io::Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
+    let (done, drained) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = pipe.read_to_end(&mut buffer);
+        let _ = done.send(buffer);
+    });
+    drained
+}
+
 /// The whole path: a transport that declares only `console`, a client that
 /// requires it, and bytes travelling in both directions over one strictly
 /// synchronous connection.
@@ -1273,6 +1300,10 @@ fn the_console_carries_bytes_both_ways() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    // Drained on workers: a pipe nobody empties is one more way to wedge the
+    // client we wait for below.
+    let printed = drained(child.stdout.take().expect("piped"));
+    let _complained = drained(child.stderr.take().expect("piped"));
 
     // The transport has to spawn, greet and open before any of this lands.
     std::thread::sleep(std::time::Duration::from_millis(400));
@@ -1300,8 +1331,18 @@ fn the_console_carries_bytes_both_ways() {
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
         }
     }
+    // End the client's input before taking `tock` away: a quiet pushed
+    // session spends its time blocked on stdin.
+    drop(stdin);
     let _ = child.kill();
-    let printed = child.wait_with_output().unwrap().stdout;
+    let _ = child.wait();
+    let printed = match printed.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(printed) => printed,
+        Err(_) => panic!(
+            "the console's output is still open with `tock` killed: the \
+             client never noticed its connection dying"
+        ),
+    };
 
     assert!(
         heard.windows(5).any(|w| w == b"list\n"),
@@ -1345,6 +1386,7 @@ fn a_transport_without_a_console_refuses_up_front() {
 #[test]
 fn one_connection_reaches_two_transports() {
     use std::io::Write;
+    use std::os::fd::AsRawFd;
     use tock_proto::{Capability, Connection, Request, Response, StreamChannel};
 
     let d = Dir::new("routing-two");
@@ -1427,22 +1469,27 @@ fn one_connection_reaches_two_transports() {
         .unwrap();
     assert_eq!(tbf::Lengths::parse(&data).unwrap().total_size, 8192);
 
-    // The console, from the pty, over the same connection.
+    // The console, from the pty, over the same connection. Attach first:
+    // nothing the board says before that is read by anyone.
+    assert_eq!(
+        ch.call(Request::ConsoleAttach, vec![]).unwrap().0,
+        Response::Ok
+    );
     board.write_all(b"tock$ ").unwrap();
     board.flush().unwrap();
     let mut said = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline && !said.windows(6).any(|w| w == b"tock$ ") {
-        let (_, heard) = ch
-            .call(
-                Request::ConsoleRead {
-                    max: 64,
-                    timeout_ms: 100,
-                },
-                vec![],
-            )
-            .unwrap();
-        said.extend_from_slice(&heard);
+        // Read the pushes straight off the carrier rather than through
+        // `call`: they answer no request. Polled for readability so a broker
+        // that never pushes fails this test instead of hanging it.
+        if !readable_within(ch.reader.as_raw_fd(), 100) {
+            continue;
+        }
+        match tock_proto::read_frame::<_, Response>(&mut ch.reader).unwrap() {
+            Some((Response::Console, bytes)) => said.extend_from_slice(&bytes),
+            other => panic!("expected a console push, got {other:?}"),
+        }
     }
     assert!(
         said.windows(6).any(|w| w == b"tock$ "),
