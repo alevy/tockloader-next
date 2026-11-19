@@ -1,6 +1,7 @@
 //! Tests for resolution: which layer wins, and why it says so.
 
 use super::*;
+use crate::{Definition, Entry};
 
 /// The options of whichever transport the default route names. Every test
 /// here resolves a single transport, so this is unambiguous -- and keeping
@@ -85,6 +86,7 @@ fn board_default_transport_and_options() {
     let ctx = resolve(
         &inputs(Layer::default(), Some(("Tock.toml".into(), &project)), None),
         &Files(vec![]),
+        &Environment::bundled(),
     )
     .unwrap();
     assert_eq!(ctx.board.info.name, "nrf52840dk");
@@ -130,6 +132,7 @@ fn precedence_flag_over_alias_over_project_over_user() {
             Some(("user.toml".into(), &user)),
         ),
         &Files(vec![]),
+        &Environment::bundled(),
     )
     .unwrap();
     // The alias beats the project file.
@@ -159,6 +162,7 @@ fn precedence_flag_over_alias_over_project_over_user() {
             Some(("user.toml".into(), &user)),
         ),
         &Files(vec![]),
+        &Environment::bundled(),
     )
     .unwrap();
     assert_eq!(ctx.transport.route("default").unwrap().value, "openocd");
@@ -186,6 +190,7 @@ fn project_transport_options_beat_the_board_file() {
     let ctx = resolve(
         &inputs(Layer::default(), Some(("Tock.toml".into(), &project)), None),
         &Files(vec![]),
+        &Environment::bundled(),
     )
     .unwrap();
     assert_eq!(
@@ -217,6 +222,7 @@ fn alias_options_beat_project_options() {
             Some(("user.toml".into(), &user)),
         ),
         &Files(vec![]),
+        &Environment::bundled(),
     )
     .unwrap();
     assert_eq!(options(&ctx)["serial"].value.as_str(), Some("from-alias"));
@@ -239,7 +245,7 @@ fn env_options_beat_project_and_lose_to_flags() {
 
     let mut i = inputs(Layer::default(), Some(("Tock.toml".into(), &project)), None);
     i.env = env_layer();
-    let ctx = resolve(&i, &Files(vec![])).unwrap();
+    let ctx = resolve(&i, &Files(vec![]), &Environment::bundled()).unwrap();
     assert_eq!(options(&ctx)["path"].value.as_str(), Some("from-env"));
     assert_eq!(
         options(&ctx)["path"].source,
@@ -252,7 +258,7 @@ fn env_options_beat_project_and_lose_to_flags() {
     };
     let mut i = inputs(flags, Some(("Tock.toml".into(), &project)), None);
     i.env = env_layer();
-    let ctx = resolve(&i, &Files(vec![])).unwrap();
+    let ctx = resolve(&i, &Files(vec![]), &Environment::bundled()).unwrap();
     assert_eq!(options(&ctx)["path"].value.as_str(), Some("from-flag"));
 }
 
@@ -272,7 +278,7 @@ fn extends_overrides_one_field() {
         board: Some("boards/acme.toml".into()),
         ..Default::default()
     };
-    let ctx = resolve(&inputs(flags, None, None), &files).unwrap();
+    let ctx = resolve(&inputs(flags, None, None), &files, &Environment::bundled()).unwrap();
     assert_eq!(ctx.board.info.name, "acme");
     assert_eq!(ctx.board.info.arch, "cortex-m4");
     assert_eq!(ctx.board.app_region().start, 0x50000);
@@ -291,6 +297,7 @@ fn the_exported_document_round_trips_and_carries_no_transport_detail() {
     let ctx = resolve(
         &inputs(Layer::default(), Some(("Tock.toml".into(), &project)), None),
         &Files(vec![]),
+        &Environment::bundled(),
     )
     .unwrap();
     let exported = Context::new(&ctx, vec![PathBuf::from("/repo/blink.tab")]);
@@ -311,14 +318,34 @@ fn the_exported_document_round_trips_and_carries_no_transport_detail() {
 
 #[test]
 fn no_guessing() {
-    let err = resolve(&inputs(Layer::default(), None, None), &Files(vec![])).unwrap_err();
+    let err = resolve(
+        &inputs(Layer::default(), None, None),
+        &Files(vec![]),
+        &Environment::bundled(),
+    )
+    .unwrap_err();
     assert!(matches!(err, Error::NoBoard));
     let flags = Layer {
         board: Some("nrf52".into()),
         ..Default::default()
     };
-    let err = resolve(&inputs(flags, None, None), &Files(vec![])).unwrap_err();
-    assert!(matches!(err, Error::UnknownBoard(_)));
+    let err = resolve(
+        &inputs(flags, None, None),
+        &Files(vec![]),
+        &Environment::bundled(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::UnknownBoard { .. }));
+
+    // `known` has to come from the environment, not a hardcoded bundled
+    // list -- otherwise this goes stale the moment a personal board exists.
+    let personal = user_tier(&[("lab", "/home/me/.config/tock/boards/lab.toml", A_BOARD)]);
+    let flags = Layer {
+        board: Some("nope".into()),
+        ..Default::default()
+    };
+    let err = resolve(&inputs(flags, None, None), &Files(vec![]), &personal).unwrap_err();
+    assert!(err.to_string().contains("lab"), "{err}");
 }
 
 /// One grammar for the flag and the variable, so what `tock` writes for a
@@ -376,7 +403,7 @@ fn board_files_use_snake_case_keys_and_values() {
         board: Some("boards/snake.toml".into()),
         ..Default::default()
     };
-    let ctx = resolve(&inputs(flags, None, None), &files).unwrap();
+    let ctx = resolve(&inputs(flags, None, None), &files, &Environment::bundled()).unwrap();
     assert!(ctx.board.layout.app_ram.is_some());
     // Transport names stay as they are: `probe-rs` names an executable.
     assert_eq!(ctx.transport.route("default").unwrap().value, "probe-rs");
@@ -457,6 +484,7 @@ fn a_qualified_option_reaches_only_the_transport_it_names() {
     let ctx = resolve(
         &inputs(flags, Some(("Tock.toml".into(), &project)), None),
         &Files(vec![]),
+        &Environment::bundled(),
     )
     .unwrap();
 
@@ -511,6 +539,7 @@ fn an_unqualified_option_needs_a_default_route() {
     let err = resolve(
         &inputs(flags, Some(("Tock.toml".into(), &project)), None),
         &files,
+        &Environment::bundled(),
     )
     .unwrap_err()
     .to_string();
@@ -542,7 +571,12 @@ fn a_board_path_in_an_alias_is_relative_to_the_user_config() {
         ..Default::default()
     };
     let asked = Asked::default();
-    resolve(&inputs(flags, None, Some((CONFIG.into(), &user))), &asked).unwrap();
+    resolve(
+        &inputs(flags, None, Some((CONFIG.into(), &user))),
+        &asked,
+        &Environment::bundled(),
+    )
+    .unwrap();
 
     let asked = asked.0.borrow();
     assert_eq!(asked.len(), 1);
@@ -560,7 +594,7 @@ fn a_board_path_on_the_command_line_has_no_file_to_be_relative_to() {
         ..Default::default()
     };
     let asked = Asked::default();
-    resolve(&inputs(flags, None, None), &asked).unwrap();
+    resolve(&inputs(flags, None, None), &asked, &Environment::bundled()).unwrap();
 
     let asked = asked.0.borrow();
     assert_eq!(asked[0].0, "./mine.toml");
@@ -583,6 +617,7 @@ fn a_board_path_in_a_project_file_is_relative_to_it() {
             None,
         ),
         &asked,
+        &Environment::bundled(),
     )
     .unwrap();
 
@@ -605,6 +640,7 @@ fn a_user_config_can_name_the_board() {
             Some(("/home/me/config.toml".into(), &user)),
         ),
         &Files(vec![]),
+        &Environment::bundled(),
     )
     .unwrap();
     assert_eq!(ctx.board.info.name, "nrf52840dk");
@@ -631,6 +667,7 @@ fn a_project_file_beats_the_user_config() {
             Some(("/home/me/config.toml".into(), &user)),
         ),
         &Files(vec![]),
+        &Environment::bundled(),
     )
     .unwrap();
     assert_eq!(ctx.board.info.name, "raspberry_pi_pico_2");
@@ -648,6 +685,7 @@ fn a_board_path_in_a_user_config_is_relative_to_it() {
     resolve(
         &inputs(Layer::default(), None, Some((CONFIG.into(), &user))),
         &asked,
+        &Environment::bundled(),
     )
     .unwrap();
     let asked = asked.0.borrow();
@@ -677,6 +715,7 @@ fn a_user_config_can_default_to_a_device() {
             Some(("/home/me/config.toml".into(), &user)),
         ),
         &Files(vec![]),
+        &Environment::bundled(),
     )
     .unwrap();
     assert_eq!(ctx.board.info.name, "nrf52840dk");
@@ -717,6 +756,7 @@ fn a_default_device_yields_to_a_project_but_a_chosen_one_does_not() {
                 Some(("/home/me/config.toml".into(), &user)),
             ),
             &Files(vec![]),
+            &Environment::bundled(),
         )
         .unwrap()
         .board
@@ -737,5 +777,100 @@ fn a_default_device_yields_to_a_project_but_a_chosen_one_does_not() {
         }),
         "nrf52840dk",
         "the same alias, asked for"
+    );
+}
+
+/// Bundled boards are keyed by name in the table and by `[board].name` when
+/// scanned from a directory. If those ever disagree, one board has two names.
+#[test]
+fn every_bundled_board_is_keyed_by_its_own_name() {
+    for (key, text) in crate::BUNDLED {
+        let board = BoardFile::parse(key, text).expect("a bundled board parses");
+        assert_eq!(*key, board.info.name, "{key} is keyed by something else");
+    }
+}
+
+/// An environment of the bundled tier plus one user tier.
+fn user_tier(boards: &[(&str, &str, &str)]) -> Environment {
+    let mut env = Environment::bundled();
+    env.push(
+        boards
+            .iter()
+            .map(|(name, origin, text)| {
+                (
+                    (*name).to_string(),
+                    Entry::Board(Definition {
+                        origin: (*origin).to_string(),
+                        text: (*text).to_string(),
+                    }),
+                )
+            })
+            .collect(),
+    );
+    env
+}
+
+/// The case the tier model exists for: a personal file that shadows a builtin
+/// still inherits it. Covers bare-name resolution into the user tier, the
+/// self-exclusion that terminates it, and the merge.
+#[test]
+fn a_shadowing_board_extends_the_one_it_shadows() {
+    const MINE: &str = r#"
+        extends = "nrf52840dk"
+        [board]
+        name = "nrf52840dk"
+        arch = "cortex-m4"
+        [layout]
+        apps = { start = 0x60000, size = "512K" }
+    "#;
+    let env = user_tier(&[(
+        "nrf52840dk",
+        "/home/me/.config/tock/boards/nrf52840dk.toml",
+        MINE,
+    )]);
+    let (board, origin) = BoardFile::load("nrf52840dk", None, &Files(vec![]), &env).unwrap();
+    assert_eq!(origin, "/home/me/.config/tock/boards/nrf52840dk.toml");
+    assert_eq!(board.layout.apps.start.0, 0x60000, "the override won");
+    assert_eq!(
+        board.layout.flash.size.0, 0x100000,
+        "the builtin's flash was inherited"
+    );
+}
+
+/// Names are unique within a tier, so a sibling is reachable at the same
+/// level. `at_or_below`, not `strictly below`.
+#[test]
+fn a_board_extends_a_sibling_in_its_own_tier() {
+    let mybase = A_BOARD.replacen("\"mine\"", "\"mybase\"", 1);
+    const VARIANT: &str = r#"
+        extends = "mybase"
+        [board]
+        name = "variant"
+        [layout]
+        apps = { start = 0x60000, size = "640K" }
+    "#;
+    let env = user_tier(&[
+        (
+            "mybase",
+            "/home/me/.config/tock/boards/mybase.toml",
+            mybase.as_str(),
+        ),
+        (
+            "variant",
+            "/home/me/.config/tock/boards/variant.toml",
+            VARIANT,
+        ),
+    ]);
+    let (board, origin) = BoardFile::load("variant", None, &Files(vec![]), &env).unwrap();
+    assert_eq!(origin, "/home/me/.config/tock/boards/variant.toml");
+    assert_eq!(board.layout.apps.start.0, 0x60000, "the override won");
+    assert_eq!(
+        board.layout.flash.size.0,
+        1024 * 1024,
+        "inherited from the sibling"
+    );
+    assert_eq!(
+        board.info.arch, "cortex-m4",
+        "also inherited from the sibling"
     );
 }

@@ -56,7 +56,8 @@ use serde::{Deserialize, Serialize};
 use tock_image::{Placement, Region};
 
 use crate::{
-    BoardFile, DEFAULT_ROUTE, DeviceAlias, Error, FileSource, ProjectFile, Transport, UserConfig,
+    BoardFile, DEFAULT_ROUTE, DeviceAlias, Environment, Error, FileSource, ProjectFile, Transport,
+    UserConfig,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -338,7 +339,11 @@ impl Context {
     }
 }
 
-pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Error> {
+pub fn resolve(
+    inputs: &Inputs,
+    files: &dyn FileSource,
+    env: &Environment,
+) -> Result<Settings, Error> {
     let project = inputs.project.as_ref();
     let user = inputs.user.as_ref();
 
@@ -401,7 +406,7 @@ pub fn resolve(inputs: &Inputs, files: &dyn FileSource) -> Result<Settings, Erro
     ])
     .ok_or(Error::NoBoard)?;
     let relative_to = written_in(&board_ref.source, user.map(|(origin, _)| origin.as_str()));
-    let (board, board_origin) = BoardFile::load(&board_ref.value, relative_to, files)?;
+    let (board, board_origin) = BoardFile::load(&board_ref.value, relative_to, files, env)?;
 
     // Routes layer per capability, lowest precedence first, the way options
     // do -- so a board file saying `default = "openocd", console = "serial"`

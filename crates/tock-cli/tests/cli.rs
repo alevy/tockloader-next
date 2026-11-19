@@ -651,6 +651,42 @@ fn user_config_paths_resolve_against_the_user_config() {
 }
 
 #[test]
+fn a_bare_name_finds_a_board_in_the_user_board_directory() {
+    let d = Dir::new("user_board_dir_name");
+    std::fs::create_dir_all(d.path("cfg/boards")).unwrap();
+    let mine = d.path("cfg/boards/mine.toml");
+    // The filename (`mine.toml`) and the board's own name (`mine`) differ on
+    // purpose: `--board mine` must resolve this through the user's board
+    // directory, not through any path-shaped guess at the filename. `extends`
+    // pulls the rest of the layout from the bundled nrf52840dk, which is why
+    // this file alone has no `[layout.flash]` or `[layout.kernel]`.
+    std::fs::write(
+        &mine,
+        "extends = \"nrf52840dk\"\n\n\
+         [board]\n\
+         name = \"mine\"\n\n\
+         [layout.apps]\n\
+         start = 0x60000\n\
+         size = \"640K\"\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["--board", "mine", "config", "show"])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("cfg/config.toml"))
+        .env("TOCK_PROJECT", d.path("Tock.toml"))
+        .output()
+        .unwrap();
+    let stdout = ok(out);
+    assert!(stdout.contains("mine"), "{stdout}");
+    let canonical = std::fs::canonicalize(&mine).unwrap();
+    assert!(
+        stdout.contains(&canonical.display().to_string()),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn env_sets_transport_options() {
     let d = Dir::new("env_opt");
     d.erased("other.bin");
@@ -1806,6 +1842,191 @@ fn boards_works_when_nothing_resolves() {
         "{broken}"
     );
     assert!(broken["description"].is_null());
+}
+
+/// The listing used to show only what was compiled in plus whatever the
+/// configuration in force already named -- nothing enumerated the user's
+/// board directory itself. Now every tier is walked: a name the directory
+/// alone defines, a name it shares with (and so shadows) a bundled board,
+/// and two ways a file can fail to become one (invalid TOML, and TOML with
+/// no `[board].name`) -- neither costs its neighbours their own rows.
+#[test]
+fn boards_lists_the_user_board_directory() {
+    let d = Dir::new("boards_user_dir");
+    std::fs::create_dir_all(d.path("cfg/boards")).unwrap();
+    std::fs::write(
+        d.path("cfg/boards/mine.toml"),
+        "[board]\nname = \"mine\"\narch = \"cortex-m4\"\n\n\
+         [layout]\n\
+         flash = { start = 0x0, size = \"1M\" }\n\
+         kernel = { start = 0x0, size = \"256K\" }\n\
+         apps = { start = 0x40000, size = \"768K\" }\n",
+    )
+    .unwrap();
+    let shadowing = d.path("cfg/boards/nrf52840dk.toml");
+    std::fs::write(
+        &shadowing,
+        "extends = \"nrf52840dk\"\n\n[board]\nname = \"nrf52840dk\"\n",
+    )
+    .unwrap();
+    std::fs::write(d.path("cfg/boards/broken.toml"), "this is not toml {").unwrap();
+    std::fs::write(
+        d.path("cfg/boards/noname.toml"),
+        "[layout]\nflash = { start = 0, size = \"1M\" }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["--format", "json", "boards"])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("cfg/config.toml"))
+        .env("TOCK_PROJECT", d.path("no-project.toml"))
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_str(&ok(out)).unwrap();
+    let rows = v.as_array().unwrap();
+
+    // `mine` exists only in the user's board directory.
+    let mine = rows
+        .iter()
+        .find(|b| b["reference"] == "mine")
+        .expect("the user board directory's own board");
+    assert_eq!(
+        mine["from"][0],
+        d.path("cfg/boards").display().to_string(),
+        "{mine}"
+    );
+
+    // `nrf52840dk` is defined twice: once bundled, once in the user's
+    // directory, which shadows it.
+    let nrfs: Vec<&Value> = rows
+        .iter()
+        .filter(|b| b["reference"] == "nrf52840dk")
+        .collect();
+    assert_eq!(nrfs.len(), 2, "{rows:#?}");
+    let canonical = std::fs::canonicalize(&shadowing)
+        .unwrap()
+        .display()
+        .to_string();
+    let shadowed = nrfs
+        .iter()
+        .find(|b| b["shadowed_by"] == canonical)
+        .expect("the bundled board, shadowed by the personal file");
+    assert_eq!(shadowed["from"][0], "bundled");
+
+    // Neither `broken.toml` (invalid TOML) nor `noname.toml` (valid TOML,
+    // no `[board].name`) got a name, so each is reported by its own path --
+    // and neither one costs `mine` or `nrf52840dk` their rows, above.
+    for stray in ["broken.toml", "noname.toml"] {
+        let row = rows
+            .iter()
+            .find(|b| b["reference"].as_str().unwrap_or("").contains(stray))
+            .unwrap_or_else(|| panic!("{stray} should be reported by its own path: {rows:#?}"));
+        assert!(row["error"].is_string(), "{row}");
+    }
+}
+
+/// Two files in the board directory that both claim `nrf52840dk`: there is
+/// no text to prefer between them, so the collision must be an error rather
+/// than quietly resolving to one of the two -- the wrong one would mean the
+/// wrong flash addresses, with nothing to say so. Picking a name the bundled
+/// tier also defines exercises all three places that know about
+/// `Entry::Ambiguous`: `Environment::lookup`'s error return (`--board`,
+/// below), the ambiguous row `tock boards` prints for the user tier, and
+/// `shadowed_row`'s ambiguous-winner arm for the bundled board it shadows.
+#[test]
+fn two_board_files_claiming_the_same_name_is_an_error() {
+    let d = Dir::new("board_name_collision");
+    std::fs::create_dir_all(d.path("cfg/boards")).unwrap();
+    let a = d.path("cfg/boards/a.toml");
+    let b = d.path("cfg/boards/b.toml");
+    std::fs::write(&a, "[board]\nname = \"nrf52840dk\"\n").unwrap();
+    std::fs::write(&b, "[board]\nname = \"nrf52840dk\"\n").unwrap();
+    let a = std::fs::canonicalize(&a).unwrap().display().to_string();
+    let b = std::fs::canonicalize(&b).unwrap().display().to_string();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["--board", "nrf52840dk", "config", "show"])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("cfg/config.toml"))
+        .env("TOCK_PROJECT", d.path("no-project.toml"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a collision must not resolve");
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains(&a) && err.contains(&b), "{err}");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["--format", "json", "boards"])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("cfg/config.toml"))
+        .env("TOCK_PROJECT", d.path("no-project.toml"))
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_str(&ok(out)).unwrap();
+    let rows = v.as_array().unwrap();
+    let nrfs: Vec<&Value> = rows
+        .iter()
+        .filter(|row| row["reference"] == "nrf52840dk")
+        .collect();
+    assert_eq!(nrfs.len(), 2, "{rows:#?}");
+
+    // The user tier's own entry is the collision itself.
+    let ambiguous = nrfs
+        .iter()
+        .find(|row| row["from"][0] != "bundled")
+        .expect("the user tier's own ambiguous entry");
+    let ambiguous_error = ambiguous["error"].as_str().unwrap();
+    assert!(
+        ambiguous_error.contains(&a) && ambiguous_error.contains(&b),
+        "{ambiguous_error}"
+    );
+
+    // The bundled board is shadowed by that same collision, not by either
+    // file alone.
+    let shadowed = nrfs
+        .iter()
+        .find(|row| row["from"][0] == "bundled")
+        .expect("the bundled board the collision shadows");
+    let shadowed_by = shadowed["shadowed_by"].as_str().unwrap();
+    assert!(
+        shadowed_by.contains(&a) && shadowed_by.contains(&b),
+        "{shadowed_by}"
+    );
+}
+
+/// The design doc's own worked example: a board file that lives in the
+/// user's board directory, but is reached by its own absolute path rather
+/// than by name, must still skip itself when its `extends` names the very
+/// board it shadows -- otherwise it would find itself again and loop.
+#[test]
+fn a_board_reached_by_path_still_skips_itself_in_extends() {
+    let d = Dir::new("board_path_self_exclude");
+    std::fs::create_dir_all(d.path("cfg/boards")).unwrap();
+    let shadowing = d.path("cfg/boards/nrf52840dk.toml");
+    std::fs::write(
+        &shadowing,
+        "extends = \"nrf52840dk\"\n\n\
+         [board]\n\
+         name = \"nrf52840dk\"\n\n\
+         [layout.apps]\n\
+         start = 0x60000\n\
+         size = \"640K\"\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_tock"))
+        .args(["--board", shadowing.to_str().unwrap(), "config", "show"])
+        .current_dir(&d.0)
+        .env("TOCK_CONFIG", d.path("cfg/config.toml"))
+        .env("TOCK_PROJECT", d.path("no-project.toml"))
+        .output()
+        .unwrap();
+    let shown = ok(out);
+    // The override.
+    assert!(shown.contains("apps       0x60000 +0xa0000"), "{shown}");
+    // Inherited from the bundled board this shadows -- present only because
+    // the file excluded itself and fell through to it, rather than looping.
+    assert!(shown.contains("flash      0x0 +0x100000"), "{shown}");
 }
 
 // --- tock flash ----------------------------------------------------------

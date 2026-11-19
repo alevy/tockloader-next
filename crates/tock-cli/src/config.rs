@@ -6,7 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
-use tock_board::{Context, FileSource, Inputs, Layer, ProjectFile, Settings, UserConfig};
+use tock_board::{
+    Context, Definition, Entry, Environment, FileSource, Inputs, Layer, ProjectFile, Settings,
+    Tier, UserConfig,
+};
 
 use crate::cli::{Format, Global};
 use tock_client::{CliError, Code};
@@ -27,7 +30,12 @@ impl FileSource for Fs {
         }
         let text = std::fs::read_to_string(&path)
             .map_err(|e| tock_board::Error::Read(path.display().to_string(), e.to_string()))?;
-        Ok((path.display().to_string(), text))
+        // Canonicalised so a file reached by path compares equal to the same
+        // file found by scanning the user's board directory: that is what
+        // lets `extends` recognise and skip it, and what stops the `boards`
+        // listing counting `./mine.toml` and `mine.toml` as two boards.
+        let origin = std::fs::canonicalize(&path).unwrap_or(path);
+        Ok((origin.display().to_string(), text))
     }
 }
 
@@ -61,6 +69,105 @@ pub(crate) fn user_config_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("tock").join("config.toml"))
+}
+
+/// `boards/` beside the user config, whether or not either exists.
+pub(crate) fn user_boards_dir() -> Option<PathBuf> {
+    let path = user_config_path()?;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    Some(dir.join("boards"))
+}
+
+/// Every `*.toml` in `dir` keyed by its `[board].name`, plus the ones that
+/// could not be keyed, as (origin, why), for `tock boards` to report.
+///
+/// A missing directory is an empty tier, not an error: there is no
+/// requirement that anyone keep board files here at all. Deliberately reads
+/// each file as a raw [`toml::Table`] rather than [`tock_board::BoardFile::parse`]:
+/// a file that `extends` another is incomplete on its own -- its `[layout]`
+/// comes from its parent -- so `parse` would reject the headline case this
+/// exists to support. All that is needed here is the name.
+pub(crate) fn scan_boards(dir: &Path) -> (Tier, Vec<(String, String)>) {
+    use std::collections::btree_map::Entry as MapEntry;
+
+    let mut tier = Tier::new();
+    let mut broken = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (tier, broken);
+    };
+    // Sorted so that a collision between two files always names the same
+    // two origins, in the same order, run to run.
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .collect();
+    paths.sort();
+
+    for path in paths {
+        let origin = std::fs::canonicalize(&path)
+            .unwrap_or_else(|_| path.clone())
+            .display()
+            .to_string();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) => {
+                broken.push((origin, e.to_string()));
+                continue;
+            }
+        };
+        let table: toml::Table = match text.parse() {
+            Ok(table) => table,
+            Err(e) => {
+                broken.push((origin, e.to_string()));
+                continue;
+            }
+        };
+        let name = table
+            .get("board")
+            .and_then(toml::Value::as_table)
+            .and_then(|b| b.get("name"))
+            .and_then(toml::Value::as_str);
+        let Some(name) = name else {
+            broken.push((origin, "no [board].name".to_string()));
+            continue;
+        };
+        let definition = Definition {
+            origin: origin.clone(),
+            text,
+        };
+        match tier.entry(name.to_string()) {
+            MapEntry::Vacant(v) => {
+                v.insert(Entry::Board(definition));
+            }
+            // A second file claiming a name already present: there is no
+            // text to fall back to once two files disagree about who owns a
+            // name, so the entry itself becomes the error.
+            MapEntry::Occupied(mut o) => {
+                let origins = match o.get() {
+                    Entry::Board(existing) => vec![existing.origin.clone(), origin],
+                    Entry::Ambiguous(origins) => {
+                        let mut origins = origins.clone();
+                        origins.push(origin);
+                        origins
+                    }
+                };
+                o.insert(Entry::Ambiguous(origins));
+            }
+        }
+    }
+    (tier, broken)
+}
+
+/// The bundled tier plus the user tier.
+pub(crate) fn environment() -> (Environment, Vec<(String, String)>) {
+    let mut env = Environment::bundled();
+    let (tier, broken) = match user_boards_dir() {
+        Some(dir) => scan_boards(&dir),
+        None => (Tier::new(), Vec::new()),
+    };
+    env.push(tier);
+    (env, broken)
 }
 
 pub(crate) fn load_project() -> Result<Option<(String, ProjectFile)>, CliError> {
@@ -136,7 +243,32 @@ pub(crate) fn load_settings(g: &Global) -> Result<Settings, CliError> {
         project: project.as_ref().map(|(o, p)| (o.clone(), p)),
         user: user.as_ref().map(|(o, u)| (o.clone(), u)),
     };
-    Ok(tock_board::resolve(&inputs, &Fs)?)
+    let (env, broken) = environment();
+    tock_board::resolve(&inputs, &Fs, &env).map_err(|e| {
+        // `NoBoard`'s hint, built by `From` below from the bundled list, goes
+        // stale the moment a board directory adds its own names -- the same
+        // staleness already fixed for `UnknownBoard`. Replace it with one
+        // built from what this environment actually defines.
+        let no_board = matches!(e, tock_board::Error::NoBoard);
+        let mut err: CliError = e.into();
+        if no_board {
+            let names = env.names();
+            err.hints.clear();
+            err = err
+                .hint(format!(
+                    "tock --board <{}|path/to/board.toml> ...",
+                    names.join("|")
+                ))
+                .hint("or add `board = \"...\"` to a Tock.toml in this project");
+        }
+        // A board file sitting right there, unparsed, is the likeliest
+        // reason a hand-written board was not found: say so rather than
+        // leaving it to look like the file was never read.
+        for (origin, why) in &broken {
+            err = err.detail(format!("{origin}: {why}"));
+        }
+        err
+    })
 }
 
 /// `tock context`: print what was resolved, as a subcommand receives it.
@@ -199,13 +331,22 @@ pub(crate) struct Listed {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Everywhere this board is named: bundled, a project file, an alias.
+    /// Everywhere this board is named: bundled, the user board directory, a
+    /// project file, an alias.
     pub from: Vec<String>,
     /// Whether resolution would pick this one, right here.
     pub selected: bool,
     /// Why it could not be read, for a reference that does not resolve.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The origin of the higher-tier definition that wins this name, if one
+    /// exists -- or, when that definition is itself a collision (two files
+    /// in that tier claiming the same name), every one of the colliding
+    /// origins, joined. Once a higher tier claims a name there is no syntax
+    /// that reaches the one it shadows; this field exists so shadowing is
+    /// visible, not because the shadowed board stays reachable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadowed_by: Option<String>,
     /// Where it actually resolved to, which is how two names for one board
     /// are recognised as one. Not reported: it is bookkeeping, and the
     /// reference is what a caller would use.
@@ -213,16 +354,15 @@ pub(crate) struct Listed {
     pub resolved: Option<String>,
 }
 
-/// `tock boards`: every board this can name without being told where to
-/// look.
+/// `tock boards`: every board the environment defines, plus whatever the
+/// configuration in force already names.
 ///
-/// Which is not every board. A board is named by a bundled name or by a
-/// path, and there is no search path for the second -- unlike transports,
-/// which are found as `tock-transport-*` on `PATH`. So nothing can
-/// enumerate the board files on a disk, because nothing was ever told where
-/// they are. What can be listed is what is compiled in, plus whatever the
-/// configuration in force already names, which costs nothing because
-/// resolution reads those files anyway.
+/// A name is enumerable because `env` is: every tier was scanned to build
+/// it, so walking `env.tiers()` costs nothing beyond what resolution already
+/// paid. A path is not enumerable the same way -- nothing was ever told
+/// where a path-only board lives, unlike a transport, which is found as
+/// `tock-transport-*` on `PATH` -- so a board reached only by path still
+/// shows up solely because something currently in force names it.
 pub(crate) fn boards(g: &Global) -> Result<(), CliError> {
     // The one in force, if there is one. A listing has to work when
     // resolution does not -- "no board selected" is the commonest reason to
@@ -230,67 +370,109 @@ pub(crate) fn boards(g: &Global) -> Result<(), CliError> {
     let settled = load_settings(g);
     let chosen = settled.as_ref().ok().map(|s| s.board_file.value.clone());
     let unsettled = settled.err();
+    let (env, broken) = environment();
+    let board_dir = user_boards_dir();
+    let board_dir_label = board_dir
+        .as_ref()
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| "the user board directory".to_string());
 
-    let mut listed: Vec<Listed> = Vec::new();
-    let mut add = |reference: &str, from: String, relative_to: Option<&str>| {
-        let loaded = tock_board::BoardFile::load(reference, relative_to, &Fs);
-        // Merge by where it resolved to, so a bundled board a project also
-        // names is one row saying both, rather than two saying half each.
-        let origin = loaded.as_ref().ok().map(|(_, origin)| origin.clone());
-        if let Some(origin) = &origin {
-            if let Some(already) = listed
-                .iter_mut()
-                .find(|l| l.error.is_none() && l.resolved.as_deref() == Some(origin))
-            {
-                already.from.push(from);
-                return;
-            }
-        }
-        let (name, description, error) = match &loaded {
-            Ok((board, _)) => (
-                Some(board.info.name.clone()),
-                Some(board.info.description.clone()).filter(|d| !d.is_empty()),
-                None,
-            ),
-            Err(e) => (None, None, Some(e.to_string())),
-        };
-        listed.push(Listed {
-            reference: reference.to_string(),
-            name,
-            description,
-            selected: origin.is_some() && origin == chosen,
-            resolved: origin,
-            from: vec![from],
-            error,
-        });
+    let mut listing = Listing {
+        rows: Vec::new(),
+        env: &env,
+        chosen: chosen.as_deref(),
     };
 
-    for (name, _) in tock_board::BUNDLED {
-        add(name, "bundled".into(), None);
+    // Every tier, lowest first, a row per name. `tiers` stays borrowed for
+    // the rest of this loop so each entry can look above itself for the tier
+    // that would actually win its name.
+    let tiers = env.tiers();
+    for (i, tier) in tiers.iter().enumerate() {
+        let from = if i == 0 {
+            "bundled".to_string()
+        } else {
+            board_dir_label.clone()
+        };
+        for (name, entry) in tier {
+            match entry {
+                // Only a `Board` entry needs to know what is above it: an
+                // `Ambiguous` one is an error in its own tier regardless,
+                // so there is nothing above it to look for.
+                Entry::Board(def) => {
+                    let shadow = tiers[i + 1..].iter().rev().find_map(|t| t.get(name));
+                    match shadow {
+                        Some(winner) => {
+                            let row =
+                                shadowed_row(name, from.clone(), def, winner, chosen.as_deref());
+                            listing.rows.push(row);
+                        }
+                        None => listing.add(name, from.clone(), None),
+                    }
+                }
+                // No text to fall back to -- see `Entry::Ambiguous` -- so the
+                // row is the error, naming both files the way resolving the
+                // name itself would. Reachable today, with only two tiers:
+                // two files in the user's board directory claiming a name
+                // tier 0 also defines put an `Ambiguous` entry in tier 1
+                // above a `Board` entry in tier 0, so this and the
+                // `Entry::Ambiguous` arm in `shadowed_row` both run.
+                Entry::Ambiguous(origins) => listing.rows.push(Listed {
+                    reference: name.clone(),
+                    name: None,
+                    description: None,
+                    selected: false,
+                    resolved: None,
+                    from: vec![from.clone()],
+                    error: Some(
+                        tock_board::Error::AmbiguousBoard {
+                            name: name.clone(),
+                            origins: origins.clone(),
+                        }
+                        .to_string(),
+                    ),
+                    shadowed_by: None,
+                }),
+            }
+        }
     }
+    // A file in the board directory that would not parse at all: no name to
+    // key it by, so it is reported by its own path.
+    for (origin, why) in &broken {
+        listing.rows.push(Listed {
+            reference: origin.clone(),
+            name: None,
+            description: None,
+            selected: false,
+            resolved: None,
+            from: vec![board_dir_label.clone()],
+            error: Some(why.clone()),
+            shadowed_by: None,
+        });
+    }
+
     // A flag names a board as much as a file does, and leaving it out meant
     // `--board ./mine.toml boards` listed everything except the one it was
     // about, with nothing marked. Typed at a prompt, so relative to nothing.
     if let Some(reference) = &g.board {
-        add(reference, "flag --board".into(), None);
+        listing.add(reference, "flag --board".into(), None);
     }
     if let Some(reference) = std::env::var("TOCK_BOARD").ok().filter(|v| !v.is_empty()) {
-        add(&reference, "env TOCK_BOARD".into(), None);
+        listing.add(&reference, "env TOCK_BOARD".into(), None);
     }
     if let Some((origin, project)) = load_project()? {
         if let Some(reference) = &project.board {
-            add(reference, format!("project {origin}"), Some(&origin));
+            listing.add(reference, format!("project {origin}"), Some(&origin));
         }
     }
     if let Some((origin, user)) = load_user()? {
         if let Some(reference) = &user.board {
-            add(reference, format!("user config {origin}"), Some(&origin));
+            listing.add(reference, format!("user config {origin}"), Some(&origin));
         }
         // An alias records only its own name, so its paths are the user
         // config's -- the same rule `resolve` applies.
         for (alias, device) in &user.devices {
             if let Some(reference) = &device.board {
-                add(
+                listing.add(
                     reference,
                     format!("device `{alias}` in user config"),
                     Some(&origin),
@@ -300,13 +482,21 @@ pub(crate) fn boards(g: &Global) -> Result<(), CliError> {
     }
 
     if g.format == Format::Json {
-        println!("{}", serde_json::to_string(&listed).unwrap());
+        println!("{}", serde_json::to_string(&listing.rows).unwrap());
         return Ok(());
     }
-    for board in &listed {
+    for board in &listing.rows {
         let mark = if board.selected { '*' } else { ' ' };
         match &board.error {
-            Some(why) => println!("{mark} {:<22} ({why})", board.reference),
+            // A TOML parse error spans several lines; only the first --
+            // "TOML parse error at line 1, column 6" -- is useful here, and
+            // the rest would break this table's columns. JSON above keeps
+            // the whole thing.
+            Some(why) => println!(
+                "{mark} {:<22} ({})",
+                board.reference,
+                why.lines().next().unwrap_or_default()
+            ),
             None => {
                 // The description, or failing that what the board calls
                 // itself -- `./lora.toml` says nothing, `lora-e5-mini` does.
@@ -316,8 +506,13 @@ pub(crate) fn boards(g: &Global) -> Result<(), CliError> {
                     .as_deref()
                     .or(board.name.as_deref().filter(|n| *n != board.reference))
                     .unwrap_or("");
+                let shadow = board
+                    .shadowed_by
+                    .as_deref()
+                    .map(|by| format!("  (shadowed by {by})"))
+                    .unwrap_or_default();
                 println!(
-                    "{mark} {:<22} {what:<24} {}",
+                    "{mark} {:<22} {what:<24} {}{shadow}",
                     board.reference,
                     board.from.join(", ")
                 )
@@ -333,5 +528,106 @@ pub(crate) fn boards(g: &Global) -> Result<(), CliError> {
     }
     println!("A path to a board file also works, and is the only way to reach one");
     println!("that is neither bundled nor named above: --board ./my-board.toml");
+    println!("Board files placed in {board_dir_label} are listed above by their");
+    println!("own name, not their filename");
     Ok(())
+}
+
+/// The rows [`boards`] has built so far, plus what [`Listing::add`] needs to
+/// resolve a reference against: the environment, and the board currently in
+/// force, so a row can mark itself selected.
+struct Listing<'a> {
+    rows: Vec<Listed>,
+    env: &'a Environment,
+    chosen: Option<&'a str>,
+}
+
+impl Listing<'_> {
+    /// Resolve `reference` and add it to `rows`, merging by where it
+    /// resolved to so a bundled board a project also names is one row
+    /// saying both, rather than two saying half each. A method rather than
+    /// a closure over `rows`: the tier walk in [`boards`] also pushes rows
+    /// of its own between calls, which a closure holding `rows` borrowed
+    /// for its whole lifetime could not allow.
+    fn add(&mut self, reference: &str, from: String, relative_to: Option<&str>) {
+        let loaded = tock_board::BoardFile::load(reference, relative_to, &Fs, self.env);
+        let origin = loaded.as_ref().ok().map(|(_, origin)| origin.clone());
+        if let Some(origin) = &origin {
+            if let Some(already) = self
+                .rows
+                .iter_mut()
+                .find(|l| l.error.is_none() && l.resolved.as_deref() == Some(origin))
+            {
+                already.from.push(from);
+                return;
+            }
+        }
+        let (name, description, error) = board_summary(loaded.map(|(board, _)| board));
+        self.rows.push(Listed {
+            reference: reference.to_string(),
+            name,
+            description,
+            selected: origin.is_some() && origin.as_deref() == self.chosen,
+            resolved: origin,
+            from: vec![from],
+            error,
+            shadowed_by: None,
+        });
+    }
+}
+
+/// `(name, description, error)` out of a board that did or did not parse --
+/// what both [`Listing::add`] and `shadowed_row` need for a [`Listed`] row,
+/// differing only in whether the board came from `load` or `parse`.
+fn board_summary(
+    loaded: Result<tock_board::BoardFile, tock_board::Error>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    match loaded {
+        Ok(board) => (
+            Some(board.info.name.clone()),
+            Some(board.info.description.clone()).filter(|d| !d.is_empty()),
+            None,
+        ),
+        Err(e) => (None, None, Some(e.to_string())),
+    }
+}
+
+/// A row for a [`Definition`] a higher tier shadows. Loaded on its own
+/// rather than through `env` -- resolving by name would only ever find the
+/// tier that wins, which is the one shadowing it -- so this reads the
+/// definition's own text directly. That is exact for a bundled board, which
+/// never extends anything; a shadowed board file that itself extends a
+/// sibling would report a parse error here instead (`extends` is not a
+/// field `BoardFile` knows), rather than the merged board it stands for.
+///
+/// `winner` is what shadows `def`, which is usually one file but is not
+/// always: with only the two tiers that ship, two files in the user's
+/// board directory that both claim a name tier 0 also defines put an
+/// `Entry::Ambiguous` above the bundled board, not an `Entry::Board`. That
+/// case is reachable today, not theoretical -- see the matching arm below.
+fn shadowed_row(
+    name: &str,
+    from: String,
+    def: &Definition,
+    winner: &Entry,
+    chosen: Option<&str>,
+) -> Listed {
+    let (board_name, description, error) =
+        board_summary(tock_board::BoardFile::parse(&def.origin, &def.text));
+    let shadowed_by = Some(match winner {
+        Entry::Board(w) => w.origin.clone(),
+        // The collision itself shadows `def`: nothing singles out one of
+        // the colliding files over the other, so both are named.
+        Entry::Ambiguous(origins) => origins.join(", "),
+    });
+    Listed {
+        reference: name.to_string(),
+        name: board_name,
+        description,
+        selected: chosen == Some(def.origin.as_str()),
+        resolved: Some(def.origin.clone()),
+        from: vec![from],
+        error,
+        shadowed_by,
+    }
 }

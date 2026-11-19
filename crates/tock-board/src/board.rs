@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tock_image::{Placement, Region};
 
-use crate::{Error, FileSource, Size};
+use crate::{Environment, Error, FileSource, Size};
 
 /// Boards shipped with the tool.
 ///
@@ -19,10 +19,6 @@ pub const BUNDLED: &[(&str, &str)] = &[
         include_str!("../../../boards/raspberry_pi_pico_2.toml"),
     ),
 ];
-
-pub fn bundled(name: &str) -> Option<&'static str> {
-    BUNDLED.iter().find(|(n, _)| *n == name).map(|(_, s)| *s)
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -78,18 +74,23 @@ pub struct Range {
 }
 
 impl BoardFile {
-    /// Load a board by bundled name or by path. A reference is a path if it
-    /// contains `/` or ends in `.toml`; otherwise it must be a bundled name.
-    /// There is no fallback from one to the other.
+    /// Load a board by name or by path, resolving a bare name against
+    /// `env`. A reference is a path if it contains `/` or ends in `.toml`;
+    /// otherwise it is a name. There is no fallback from one to the other.
     ///
     /// `extends = "<reference>"` at the top level merges this file over
-    /// another board file, table by table.
+    /// another board file, table by table. A name there resolves among
+    /// tiers at or below the extending file's own tier, excluding that file
+    /// itself -- see [`Environment`].
     pub fn load(
         reference: &str,
         relative_to: Option<&str>,
         files: &dyn FileSource,
+        env: &Environment,
     ) -> Result<(BoardFile, String), Error> {
-        let (origin, table) = load_merged(reference, relative_to, files, 0)?;
+        let mut visited = Vec::new();
+        let (origin, table) =
+            load_merged(reference, relative_to, files, env, None, None, &mut visited)?;
         let board: BoardFile =
             toml::Value::Table(table)
                 .try_into()
@@ -156,18 +157,46 @@ fn load_merged(
     reference: &str,
     relative_to: Option<&str>,
     files: &dyn FileSource,
-    depth: u32,
+    env: &Environment,
+    // Tier of the file making this reference; `None` is above every tier.
+    from_tier: Option<usize>,
+    // Origin of the file making this reference, so `extends` cannot find
+    // itself.
+    exclude: Option<&str>,
+    // Origins already on the chain, newest last, for a named cycle.
+    visited: &mut Vec<String>,
 ) -> Result<(String, toml::Table), Error> {
-    if depth > 8 {
-        return Err(Error::ExtendsLoop(reference.into()));
-    }
     let is_path = reference.contains('/') || reference.ends_with(".toml");
-    let (origin, text) = if is_path {
-        files.read(reference, relative_to)?
+    let (origin, text, tier) = if is_path {
+        let (origin, text) = files.read(reference, relative_to)?;
+        (origin, text, None)
     } else {
-        let text = bundled(reference).ok_or_else(|| Error::UnknownBoard(reference.into()))?;
-        (format!("bundled:{reference}"), text.to_string())
+        match env.lookup(reference, from_tier, exclude)? {
+            Some((tier, def)) => (def.origin.clone(), def.text.clone(), Some(tier)),
+            // `exclude` is set only when this lookup is for an `extends`
+            // target; the top-level reference has none.
+            None if exclude.is_none() => {
+                return Err(Error::UnknownBoard {
+                    name: reference.into(),
+                    known: env.names(),
+                });
+            }
+            None => {
+                return Err(Error::NoParent {
+                    name: reference.into(),
+                    origin: exclude.unwrap().to_string(),
+                });
+            }
+        }
     };
+
+    if let Some(start) = visited.iter().position(|o| *o == origin) {
+        let mut chain = visited[start..].to_vec();
+        chain.push(origin);
+        return Err(Error::ExtendsLoop { chain });
+    }
+    visited.push(origin.clone());
+
     let mut table: toml::Table = text.parse().map_err(|e: toml::de::Error| Error::Parse {
         origin: origin.clone(),
         message: e.to_string(),
@@ -184,7 +213,15 @@ fn load_merged(
     } else {
         Some(origin.as_str())
     };
-    let (_, mut base) = load_merged(parent, parent_rel, files, depth + 1)?;
+    let (_, mut base) = load_merged(
+        parent,
+        parent_rel,
+        files,
+        env,
+        tier,
+        Some(origin.as_str()),
+        visited,
+    )?;
     merge(&mut base, table);
     Ok((origin, base))
 }

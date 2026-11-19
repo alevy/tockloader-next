@@ -137,6 +137,14 @@ A project that names its own board still wins: naming a device is an act,
 having one is a habit, and checking out someone else's work should not
 quietly use your board's address map.
 
+Board files are not limited to the ones bundled with the tool: anything
+placed in `~/.config/tock/boards/` is nameable the same way, keyed by its own
+`[board].name` and not by its filename. One that names a board already
+bundled shadows it, and can still build on it with `extends =
+"nrf52840dk"`, naming only what differs -- an app region moved to make room
+for something else, say. `tock boards` lists what is there alongside what is
+bundled, and says when one shadows the other.
+
 Or put the settings in a `Tock.toml`, next to the apps:
 
 ```toml
