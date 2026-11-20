@@ -339,14 +339,6 @@ pub(crate) struct Listed {
     /// Why it could not be read, for a reference that does not resolve.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// The origin of the higher-tier definition that wins this name, if one
-    /// exists -- or, when that definition is itself a collision (two files
-    /// in that tier claiming the same name), every one of the colliding
-    /// origins, joined. Once a higher tier claims a name there is no syntax
-    /// that reaches the one it shadows; this field exists so shadowing is
-    /// visible, not because the shadowed board stays reachable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shadowed_by: Option<String>,
     /// Where it actually resolved to, which is how two names for one board
     /// are recognised as one. Not reported: it is bookkeeping, and the
     /// reference is what a caller would use.
@@ -383,57 +375,34 @@ pub(crate) fn boards(g: &Global) -> Result<(), CliError> {
         chosen: chosen.as_deref(),
     };
 
-    // Every tier, lowest first, a row per name. `tiers` stays borrowed for
-    // the rest of this loop so each entry can look above itself for the tier
-    // that would actually win its name.
+    // Every name any tier defines. A name resolves to the highest tier
+    // that defines it, which is the one `add` will find -- so the row says
+    // which tier won, and says so when that shadowed a lower one, rather
+    // than giving the shadowed definition a row of its own that no
+    // reference could reach anyway. An ambiguous name needs no special
+    // case here: resolving it is the error, and `add` records that.
     let tiers = env.tiers();
-    for (i, tier) in tiers.iter().enumerate() {
-        let from = if i == 0 {
+    let label = |i: usize| {
+        if i == 0 {
             "bundled".to_string()
         } else {
             board_dir_label.clone()
-        };
-        for (name, entry) in tier {
-            match entry {
-                // Only a `Board` entry needs to know what is above it: an
-                // `Ambiguous` one is an error in its own tier regardless,
-                // so there is nothing above it to look for.
-                Entry::Board(def) => {
-                    let shadow = tiers[i + 1..].iter().rev().find_map(|t| t.get(name));
-                    match shadow {
-                        Some(winner) => {
-                            let row =
-                                shadowed_row(name, from.clone(), def, winner, chosen.as_deref());
-                            listing.rows.push(row);
-                        }
-                        None => listing.add(name, from.clone(), None),
-                    }
-                }
-                // No text to fall back to -- see `Entry::Ambiguous` -- so the
-                // row is the error, naming both files the way resolving the
-                // name itself would. Reachable today, with only two tiers:
-                // two files in the user's board directory claiming a name
-                // tier 0 also defines put an `Ambiguous` entry in tier 1
-                // above a `Board` entry in tier 0, so this and the
-                // `Entry::Ambiguous` arm in `shadowed_row` both run.
-                Entry::Ambiguous(origins) => listing.rows.push(Listed {
-                    reference: name.clone(),
-                    name: None,
-                    description: None,
-                    selected: false,
-                    resolved: None,
-                    from: vec![from.clone()],
-                    error: Some(
-                        tock_board::Error::AmbiguousBoard {
-                            name: name.clone(),
-                            origins: origins.clone(),
-                        }
-                        .to_string(),
-                    ),
-                    shadowed_by: None,
-                }),
-            }
         }
+    };
+    for name in env.names() {
+        let defining: Vec<usize> = tiers
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.contains_key(&name))
+            .map(|(i, _)| i)
+            .collect();
+        let from = match defining.as_slice() {
+            [only] => label(*only),
+            [lowest, .., top] => format!("{} (shadows {})", label(*top), label(*lowest)),
+            // `names` only yields names some tier defines.
+            [] => continue,
+        };
+        listing.add(&name, from, None);
     }
     // A file in the board directory that would not parse at all: no name to
     // key it by, so it is reported by its own path.
@@ -446,7 +415,6 @@ pub(crate) fn boards(g: &Global) -> Result<(), CliError> {
             resolved: None,
             from: vec![board_dir_label.clone()],
             error: Some(why.clone()),
-            shadowed_by: None,
         });
     }
 
@@ -506,13 +474,8 @@ pub(crate) fn boards(g: &Global) -> Result<(), CliError> {
                     .as_deref()
                     .or(board.name.as_deref().filter(|n| *n != board.reference))
                     .unwrap_or("");
-                let shadow = board
-                    .shadowed_by
-                    .as_deref()
-                    .map(|by| format!("  (shadowed by {by})"))
-                    .unwrap_or_default();
                 println!(
-                    "{mark} {:<22} {what:<24} {}{shadow}",
+                    "{mark} {:<22} {what:<24} {}",
                     board.reference,
                     board.from.join(", ")
                 )
@@ -571,14 +534,12 @@ impl Listing<'_> {
             resolved: origin,
             from: vec![from],
             error,
-            shadowed_by: None,
         });
     }
 }
 
 /// `(name, description, error)` out of a board that did or did not parse --
-/// what both [`Listing::add`] and `shadowed_row` need for a [`Listed`] row,
-/// differing only in whether the board came from `load` or `parse`.
+/// what a [`Listed`] row needs to say about it.
 fn board_summary(
     loaded: Result<tock_board::BoardFile, tock_board::Error>,
 ) -> (Option<String>, Option<String>, Option<String>) {
@@ -589,45 +550,5 @@ fn board_summary(
             None,
         ),
         Err(e) => (None, None, Some(e.to_string())),
-    }
-}
-
-/// A row for a [`Definition`] a higher tier shadows. Loaded on its own
-/// rather than through `env` -- resolving by name would only ever find the
-/// tier that wins, which is the one shadowing it -- so this reads the
-/// definition's own text directly. That is exact for a bundled board, which
-/// never extends anything; a shadowed board file that itself extends a
-/// sibling would report a parse error here instead (`extends` is not a
-/// field `BoardFile` knows), rather than the merged board it stands for.
-///
-/// `winner` is what shadows `def`, which is usually one file but is not
-/// always: with only the two tiers that ship, two files in the user's
-/// board directory that both claim a name tier 0 also defines put an
-/// `Entry::Ambiguous` above the bundled board, not an `Entry::Board`. That
-/// case is reachable today, not theoretical -- see the matching arm below.
-fn shadowed_row(
-    name: &str,
-    from: String,
-    def: &Definition,
-    winner: &Entry,
-    chosen: Option<&str>,
-) -> Listed {
-    let (board_name, description, error) =
-        board_summary(tock_board::BoardFile::parse(&def.origin, &def.text));
-    let shadowed_by = Some(match winner {
-        Entry::Board(w) => w.origin.clone(),
-        // The collision itself shadows `def`: nothing singles out one of
-        // the colliding files over the other, so both are named.
-        Entry::Ambiguous(origins) => origins.join(", "),
-    });
-    Listed {
-        reference: name.to_string(),
-        name: board_name,
-        description,
-        selected: chosen == Some(def.origin.as_str()),
-        resolved: Some(def.origin.clone()),
-        from: vec![from],
-        error,
-        shadowed_by,
     }
 }
